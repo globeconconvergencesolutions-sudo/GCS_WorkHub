@@ -28,21 +28,21 @@ export default async function LoginPage({
             </div>
           </div>
 
+          <div className="showcase-kicker"><span className="live-dot" /> Built for focused operations</div>
           <p className="eyebrow">GlobeCon Convergence Solutions</p>
-          <h1>Step into the WorkHub command center.</h1>
+          <h1>Make every decision visible. Make every delivery count.</h1>
           <p>
-            Sign in to continue the day’s work with the right level of visibility, from executive oversight to personal
-            delivery.
+            WorkHub gives every team a shared operating picture — with the context, ownership, and momentum to move work forward.
           </p>
 
           <div className="login-stat-strip">
             <div>
-              <strong>RBAC ready</strong>
-              <span>Executive, department head, and staff scoped views</span>
+              <strong>One source of truth</strong>
+              <span>Role-aware workspaces for every layer of the organization</span>
             </div>
             <div>
-              <strong>Live workspace</strong>
-              <span>Projects, dependencies, approvals, deliverables, and audit trail</span>
+              <strong>Calm momentum</strong>
+              <span>Projects, dependencies, approvals, and delivery signals in one place</span>
             </div>
           </div>
 
@@ -63,9 +63,9 @@ export default async function LoginPage({
         </article>
 
         <section className="setup-card login-card">
-          <p className="eyebrow">Secure sign-in</p>
-          <h2>Tell WorkHub who you are</h2>
-          <p>Use your GlobeCon credentials and WorkHub will open the right workspace for your role.</p>
+          <div className="login-card-topline"><p className="eyebrow">Workspace access</p><span className="secure-label">Encrypted session</span></div>
+          <h2>Welcome back.</h2>
+          <p>Sign in with your GlobeCon credentials to pick up exactly where your team left off.</p>
 
           <LoginForm callbackUrl={callbackUrl} />
 

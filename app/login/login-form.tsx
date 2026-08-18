@@ -52,10 +52,14 @@ export function LoginForm({ callbackUrl }: { callbackUrl: string }) {
           </button>
         </div>
       </label>
-      {error && <p className="form-error">{error}</p>}
+      <div className="login-form-meta">
+        <label className="remember-toggle"><input type="checkbox" name="remember" defaultChecked /><span>Keep me signed in</span></label>
+        <button className="text-action" type="button" onClick={() => setError('Password recovery is handled by your WorkHub administrator.')}>Forgot password?</button>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
       <p className="login-helper-copy">WorkHub aligns your view, approvals, and controls automatically after sign-in.</p>
       <button className="create-button" type="submit" disabled={pending}>
-        {pending ? 'Signing in…' : 'Sign in to WorkHub'}
+        {pending ? <><span className="button-spinner" aria-hidden="true" /> Signing in…</> : 'Sign in to WorkHub'}
       </button>
     </form>
   )
