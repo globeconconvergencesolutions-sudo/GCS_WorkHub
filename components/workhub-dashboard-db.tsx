@@ -49,6 +49,12 @@ import {
   requestTaskRevision,
   completeTask,
   createDeliverable,
+  markAllNotificationsRead,
+  markNotificationRead,
+  createManagementRequest,
+  updateManagementRequestStatus,
+  updateNotificationPreferences,
+  sendWorkspaceReminder,
   logout,
   submitDeliverable,
   verifyDeliverable,
@@ -162,8 +168,42 @@ type DbProject = {
   title: string
   owner: string
   progress: number
+  completionRate: number
   status: string
+  risk: string
+  overdueCount: number
+  blockedCount: number
+  milestoneCount: number
+  nextMilestone: string
   tasks: string
+}
+
+type DbNotification = {
+  id: string
+  type: string
+  title: string
+  body: string
+  readAt: string | Date | null
+  createdAt: string | Date
+}
+
+type DbManagementRequest = {
+  id: string
+  title: string
+  description?: string | null
+  priority: string
+  status: string
+  responseNotes?: string | null
+  requestor?: { firstName: string; lastName: string } | null
+  assignee?: { firstName: string; lastName: string } | null
+}
+
+type NotificationPreferences = {
+  deadlineAlerts: number
+  escalationAlerts: number
+  approvalAlerts: number
+  managementRequestAlerts: number
+  dailySummary: number
 }
 
 type Metrics = {
@@ -204,6 +244,10 @@ export default function WorkhubDashboardDB({
   currentUserRoles,
   initialView = 'Overview',
   myTaskCount,
+  initialNotifications,
+  unreadNotificationCount,
+  managementRequests: initialManagementRequests,
+  notificationPreferences: initialNotificationPreferences,
 }: {
   initialTasks: DbTask[]
   initialDepartments: DbDepartment[]
@@ -221,6 +265,10 @@ export default function WorkhubDashboardDB({
   currentUserRoles: string[]
   initialView?: View
   myTaskCount: number
+  initialNotifications: DbNotification[]
+  unreadNotificationCount: number
+  managementRequests: DbManagementRequest[]
+  notificationPreferences: NotificationPreferences
 }) {
   const router = useRouter()
   const [query, setQuery] = useState('')
@@ -234,6 +282,13 @@ export default function WorkhubDashboardDB({
   const [selectedTask, setSelectedTask] = useState<DbTask | null>(null)
   const [showNotifications, setShowNotifications] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
+  const [notificationRows, setNotificationRows] = useState(initialNotifications)
+  const [unreadCount, setUnreadCount] = useState(unreadNotificationCount)
+  const [managementRequestRows] = useState(initialManagementRequests)
+  const [requestTitle, setRequestTitle] = useState('')
+  const [requestDescription, setRequestDescription] = useState('')
+  const [reminderMessage, setReminderMessage] = useState('')
+  const [reminderTargetId, setReminderTargetId] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [showCreateProject, setShowCreateProject] = useState(false)
   const [showCreateResp, setShowCreateResp] = useState(false)
@@ -697,6 +752,52 @@ export default function WorkhubDashboardDB({
     })
   }
 
+  function handleMarkNotificationRead(notificationId: string) {
+    startTransition(async () => {
+      await markNotificationRead(notificationId)
+      setNotificationRows((rows) =>
+        rows.map((row) => (row.id === notificationId ? { ...row, readAt: new Date().toISOString() } : row)),
+      )
+      setUnreadCount((count) => Math.max(0, count - 1))
+      router.refresh()
+    })
+  }
+
+  function handleMarkAllNotificationsRead() {
+    startTransition(async () => {
+      await markAllNotificationsRead()
+      setNotificationRows((rows) => rows.map((row) => ({ ...row, readAt: row.readAt ?? new Date().toISOString() })))
+      setUnreadCount(0)
+      router.refresh()
+    })
+  }
+
+  function handleCreateManagementRequest() {
+    if (!requestTitle.trim()) return
+    const formData = new FormData()
+    formData.set('title', requestTitle)
+    formData.set('description', requestDescription)
+    formData.set('priority', 'medium')
+    const assignee = people.find((person) => person.id !== currentUserId)
+    if (assignee) formData.set('assigneeId', assignee.id)
+    startTransition(async () => {
+      await createManagementRequest(formData)
+      setRequestTitle('')
+      setRequestDescription('')
+      router.refresh()
+    })
+  }
+
+  function handleSendReminder() {
+    if (!reminderTargetId || !reminderMessage.trim()) return
+    startTransition(async () => {
+      await sendWorkspaceReminder({ userId: reminderTargetId, message: reminderMessage })
+      setReminderMessage('')
+      setReminderTargetId('')
+      router.refresh()
+    })
+  }
+
   const filteredResponsibilities = respFilter === 'mine'
     ? responsibilityRows.filter((r) => r.owner.firstName === currentUser?.firstName && r.owner.lastName === currentUser?.lastName)
     : responsibilityRows
@@ -869,7 +970,8 @@ export default function WorkhubDashboardDB({
               ))}
             </select>
             <button className="icon-button" aria-label="Notifications" onClick={() => setShowNotifications(!showNotifications)}>
-              <Bell aria-hidden="true" /><i />
+              <Bell aria-hidden="true" />
+              {unreadCount > 0 && <i aria-hidden="true">{unreadCount > 9 ? '9+' : unreadCount}</i>}
             </button>
             <button className="profile-button" onClick={() => setShowProfile(!showProfile)}>
               <Avatar initials={currentUser?.initials ?? 'G'} tone="avatar-navy" />
@@ -883,10 +985,31 @@ export default function WorkhubDashboardDB({
         </header>
 
         {showNotifications && (
-          <div className="popover notifications">
-            <strong>Notifications</strong>
-            <p><CircleAlert aria-hidden="true" /> {metrics.blocked} tasks are blocked.</p>
-            <p><Clock3 aria-hidden="true" /> {metrics.dueToday} tasks are due today.</p>
+          <div className="popover notifications notification-center">
+            <div className="notification-center-head">
+              <strong>Notification center</strong>
+              <button className="view-all" type="button" onClick={handleMarkAllNotificationsRead}>
+                Mark all read
+              </button>
+            </div>
+            <div className="notification-list">
+              {notificationRows.length === 0 ? (
+                <p className="empty-state">You are fully caught up.</p>
+              ) : (
+                notificationRows.map((notification) => (
+                  <button
+                    key={notification.id}
+                    type="button"
+                    className={notification.readAt ? 'notification-item read' : 'notification-item unread'}
+                    onClick={() => handleMarkNotificationRead(notification.id)}
+                  >
+                    <strong>{notification.title}</strong>
+                    <span>{notification.body}</span>
+                    <small>{formatRelative(notification.createdAt)}</small>
+                  </button>
+                ))
+              )}
+            </div>
           </div>
         )}
         {showProfile && currentUser && (
@@ -897,6 +1020,23 @@ export default function WorkhubDashboardDB({
               {currentUserRoles.map((role) => role.replaceAll('_', ' ')).join(' · ') || 'Employee'}
             </small>
             <button onClick={() => setShowProfile(false)}>Close</button>
+            <form
+              className="notification-preferences"
+              action={async (formData) => {
+                startTransition(async () => {
+                  await updateNotificationPreferences(formData)
+                  router.refresh()
+                })
+              }}
+            >
+              <strong>Alert preferences</strong>
+              <label><input type="checkbox" name="deadlineAlerts" defaultChecked={Boolean(initialNotificationPreferences.deadlineAlerts)} /> Deadline alerts</label>
+              <label><input type="checkbox" name="escalationAlerts" defaultChecked={Boolean(initialNotificationPreferences.escalationAlerts)} /> Escalation alerts</label>
+              <label><input type="checkbox" name="approvalAlerts" defaultChecked={Boolean(initialNotificationPreferences.approvalAlerts)} /> Approval alerts</label>
+              <label><input type="checkbox" name="managementRequestAlerts" defaultChecked={Boolean(initialNotificationPreferences.managementRequestAlerts)} /> Management request alerts</label>
+              <label><input type="checkbox" name="dailySummary" defaultChecked={Boolean(initialNotificationPreferences.dailySummary)} /> Daily and periodic summaries</label>
+              <button type="submit">Save preferences</button>
+            </form>
             <button
               onClick={() =>
                 startTransition(async () => {
@@ -1157,6 +1297,74 @@ export default function WorkhubDashboardDB({
                     {metrics.overdue > 0 && (
                       <div><UsersRound aria-hidden="true" /><span><strong>{metrics.overdue} tasks</strong> are overdue across the company.</span></div>
                     )}
+                    {unreadCount > 0 && (
+                      <div><Bell aria-hidden="true" /><span><strong>{unreadCount} alerts</strong> are waiting in your notification center.</span></div>
+                    )}
+                  </div>
+                </section>
+              </div>
+              <div className="dashboard-grid">
+                <section className="panel report-panel">
+                  <div className="panel-heading">
+                    <div><h2>Management requests</h2><p>Track leadership asks and responses</p></div>
+                    <Target aria-hidden="true" className="heading-icon" />
+                  </div>
+                  <div className="management-request-form">
+                    <input value={requestTitle} onChange={(e) => setRequestTitle(e.target.value)} placeholder="Request title" />
+                    <textarea value={requestDescription} onChange={(e) => setRequestDescription(e.target.value)} placeholder="What do you need from leadership?" />
+                    <button className="create-button" type="button" onClick={handleCreateManagementRequest}>Submit request</button>
+                  </div>
+                  <div className="responsibility-list">
+                    {managementRequestRows.length === 0 ? (
+                      <p className="empty-state">No management requests yet.</p>
+                    ) : (
+                      managementRequestRows.map((request) => (
+                        <div className="responsibility-row" key={request.id}>
+                          <div className="responsibility-main">
+                            <strong>{request.title}</strong>
+                            <span>{request.requestor ? fullName(request.requestor) : 'Unknown'} · {request.priority} priority</span>
+                          </div>
+                          <StatusBadge status={request.status.replaceAll('_', ' ')} />
+                          {canViewReports && request.status !== 'resolved' && (
+                            <button
+                              className="filter-pill"
+                              type="button"
+                              onClick={() =>
+                                startTransition(async () => {
+                                  await updateManagementRequestStatus(request.id, 'resolved')
+                                  router.refresh()
+                                })
+                              }
+                            >
+                              Resolve
+                            </button>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+                <section className="panel report-panel">
+                  <div className="panel-heading">
+                    <div><h2>Communication</h2><p>Send reminders and request updates</p></div>
+                    <MessageSquare aria-hidden="true" className="heading-icon" />
+                  </div>
+                  {canCreateWork && (
+                    <div className="management-request-form">
+                      <select value={reminderTargetId} onChange={(e) => setReminderTargetId(e.target.value)}>
+                        <option value="">Select team member</option>
+                        {people.map((person) => (
+                          <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>
+                        ))}
+                      </select>
+                      <textarea value={reminderMessage} onChange={(e) => setReminderMessage(e.target.value)} placeholder="Write a reminder or update request" />
+                      <button className="create-button" type="button" onClick={handleSendReminder}>Send reminder</button>
+                    </div>
+                  )}
+                  <div className="attention-list">
+                    <div><Activity aria-hidden="true" /><span><strong>{allActivity.length} recent events</strong> tracked across your workspace scope.</span></div>
+                    <div><UsersRound aria-hidden="true" /><span><strong>{people.length} people</strong> visible in your current access context.</span></div>
+                    <div><BriefcaseBusiness aria-hidden="true" /><span><strong>{projects.length} projects</strong> currently in view with health and risk indicators.</span></div>
                   </div>
                 </section>
               </div>
@@ -1882,23 +2090,44 @@ function ProjectCard({
   title,
   owner,
   progress,
+  completionRate,
   status,
+  risk,
+  overdueCount,
+  blockedCount,
+  nextMilestone,
   tasks,
 }: DbProject) {
   return (
     <article className="panel project-card">
       <div className="project-card-top">
         <span className="project-icon"><BriefcaseBusiness aria-hidden="true" /></span>
-        <StatusBadge status={status} />
+        <div className="project-card-badges">
+          <StatusBadge status={status} />
+          <StatusBadge status={risk} />
+        </div>
       </div>
       <h2>{title}</h2>
       <p>Owned by {owner}</p>
+      <div className="project-progress">
+        <strong>{completionRate}%</strong>
+        <span>completion</span>
+      </div>
       <div className="progress-track">
         <div className="progress-fill fill-teal" style={{ width: `${progress}%` }} />
       </div>
+      <div className="project-meta">
+        <span>{tasks} tasks</span>
+        <span>{overdueCount} overdue</span>
+        <span>{blockedCount} blocked</span>
+      </div>
+      <div className="project-risk">
+        <CircleAlert aria-hidden="true" />
+        <span>Next milestone: {nextMilestone}</span>
+      </div>
       <div className="project-footer">
         <strong>{progress}%</strong>
-        <span>{tasks} tasks</span>
+        <span>tracked progress</span>
         <ArrowUpRight aria-hidden="true" />
       </div>
     </article>

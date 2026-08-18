@@ -30,6 +30,9 @@ import {
   users,
   roles,
   userRoles,
+  notifications,
+  notificationPreferences,
+  managementRequests,
 } from '@/lib/db/schema'
 import type {
   projectStatusEnum,
@@ -37,6 +40,8 @@ import type {
   taskCategoryEnum,
   taskPriorityEnum,
   taskStatusEnum,
+  managementRequestPriorityEnum,
+  managementRequestStatusEnum,
 } from '@/lib/db/schema'
 import { statusLabel } from '@/lib/format'
 
@@ -1003,6 +1008,198 @@ export async function updateTaskStatus(
   if (shouldRecalculateUnblocked) {
     await recalculateUnblockedTasks(taskId, task.companyId, currentUser?.id ?? null)
   }
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function markNotificationRead(notificationId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [notification] = await getDb()
+    .select()
+    .from(notifications)
+    .where(and(eq(notifications.id, notificationId), eq(notifications.userId, currentUser.id)))
+    .limit(1)
+
+  if (!notification) return { error: 'Notification not found.' }
+
+  await getDb()
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(eq(notifications.id, notificationId))
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function markAllNotificationsRead() {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  await getDb()
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(eq(notifications.userId, currentUser.id))
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function updateNotificationPreferences(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const values = {
+    deadlineAlerts: formData.get('deadlineAlerts') === 'on' ? 1 : 0,
+    escalationAlerts: formData.get('escalationAlerts') === 'on' ? 1 : 0,
+    approvalAlerts: formData.get('approvalAlerts') === 'on' ? 1 : 0,
+    managementRequestAlerts: formData.get('managementRequestAlerts') === 'on' ? 1 : 0,
+    dailySummary: formData.get('dailySummary') === 'on' ? 1 : 0,
+    updatedAt: new Date(),
+  }
+
+  await getDb()
+    .insert(notificationPreferences)
+    .values({ userId: currentUser.id, ...values })
+    .onConflictDoUpdate({
+      target: notificationPreferences.userId,
+      set: values,
+    })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function createManagementRequest(formData: FormData) {
+  const title = String(formData.get('title') ?? '').trim()
+  if (!title) return { error: 'A request title is required.' }
+
+  const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
+  if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
+
+  const description = String(formData.get('description') ?? '').trim() || null
+  const assigneeId = String(formData.get('assigneeId') ?? '') || null
+  const priority = (String(formData.get('priority') || 'medium') ||
+    'medium') as (typeof managementRequestPriorityEnum.enumValues)[number]
+
+  const [request] = await getDb()
+    .insert(managementRequests)
+    .values({
+      companyId: company.id,
+      requestorId: currentUser.id,
+      assigneeId,
+      title,
+      description,
+      priority,
+      status: 'open',
+    })
+    .returning()
+
+  if (assigneeId) {
+    await getDb().insert(notifications).values({
+      companyId: company.id,
+      userId: assigneeId,
+      type: 'management_request',
+      title: 'New management request',
+      body: `${currentUser.firstName} ${currentUser.lastName} submitted "${title}".`,
+      entityType: 'management_request',
+      entityId: request.id,
+    })
+  }
+
+  await getDb().insert(activityEvents).values({
+    companyId: company.id,
+    actorId: currentUser.id,
+    entityType: 'management_request',
+    entityId: request.id,
+    action: 'created',
+    summary: `submitted management request ${title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function updateManagementRequestStatus(
+  requestId: string,
+  status: (typeof managementRequestStatusEnum.enumValues)[number],
+  responseNotes?: string,
+) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [request] = await getDb()
+    .select()
+    .from(managementRequests)
+    .where(eq(managementRequests.id, requestId))
+    .limit(1)
+
+  if (!request) return { error: 'Management request not found.' }
+
+  const canUpdate =
+    isManagement(currentUser) ||
+    request.assigneeId === currentUser.id ||
+    request.requestorId === currentUser.id
+
+  if (!canUpdate) return { error: 'You are not allowed to update this request.' }
+
+  await getDb()
+    .update(managementRequests)
+    .set({
+      status,
+      responseNotes: responseNotes?.trim() || request.responseNotes,
+      respondedAt: ['resolved', 'cancelled'].includes(status) ? new Date() : request.respondedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(managementRequests.id, requestId))
+
+  if (request.requestorId !== currentUser.id) {
+    await getDb().insert(notifications).values({
+      companyId: request.companyId,
+      userId: request.requestorId,
+      type: 'management_request',
+      title: 'Management request updated',
+      body: `Your request "${request.title}" is now ${status.replaceAll('_', ' ')}.`,
+      entityType: 'management_request',
+      entityId: request.id,
+    })
+  }
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function sendWorkspaceReminder(input: { userId: string; message: string; taskId?: string }) {
+  const currentUser = await getCurrentUser()
+  const company = await getCompany()
+  if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
+  if (!isManagement(currentUser) && !canCreateProjects(currentUser)) {
+    return { error: 'You are not allowed to send reminders.' }
+  }
+
+  const message = input.message.trim()
+  if (!message) return { error: 'Reminder message is required.' }
+
+  await getDb().insert(notifications).values({
+    companyId: company.id,
+    userId: input.userId,
+    type: 'reminder',
+    title: 'WorkHub reminder',
+    body: message,
+    entityType: input.taskId ? 'task' : 'user',
+    entityId: input.taskId ?? null,
+  })
+
+  await getDb().insert(activityEvents).values({
+    companyId: company.id,
+    actorId: currentUser.id,
+    entityType: 'notification',
+    entityId: null,
+    action: 'reminder_sent',
+    summary: `sent a reminder to a team member`,
+  })
 
   refreshWorkhub()
   return { ok: true }

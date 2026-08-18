@@ -200,6 +200,21 @@ button, input { font: inherit; }
 .login-stat-strip span,
 .login-feature-card span,
 .login-footer-note span { display: block; font-size: 11px; line-height: 1.6; margin-top: 6px; }
+.notification-center { width: min(100vw - 32px, 360px); padding: 0; overflow: hidden; }
+.notification-center-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.notification-list { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; }
+.notification-item { border: 0; background: transparent; text-align: left; padding: 14px 16px; border-bottom: 1px solid oklch(.9 .012 92); cursor: pointer; }
+.notification-item.unread { background: color-mix(in oklch, var(--accent) 18%, transparent); }
+.notification-item strong, .notification-item span, .notification-item small { display: block; }
+.notification-item span { color: var(--muted-foreground); font-size: 11px; margin-top: 4px; line-height: 1.5; }
+.notification-item small { color: var(--muted-foreground); font-size: 10px; margin-top: 6px; }
+.icon-button i { min-width: 16px; height: 16px; display: grid; place-items: center; font-style: normal; font-size: 9px; font-weight: 800; color: oklch(.98 .01 92); background: oklch(.58 .14 28); border-radius: 999px; padding: 0 4px; top: -4px; right: -6px; }
+.notification-preferences { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; }
+.notification-preferences label { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); }
+.management-request-form { display: grid; gap: 10px; margin: 16px 0; }
+.management-request-form input, .management-request-form textarea, .management-request-form select { width: 100%; border: 1px solid var(--input); border-radius: 8px; background: var(--background); padding: 10px 12px; font-size: 12px; }
+.management-request-form textarea { min-height: 84px; resize: vertical; }
+.project-card-badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .login-feature-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 18px; }
 .login-card { width: min(100%, 460px); justify-self: end; }
 .login-card h2 { margin: 0 0 10px; font-size: 30px; letter-spacing: -.04em; }

@@ -46,6 +46,38 @@ export const projectMilestoneStatusEnum = pgEnum('project_milestone_status', [
   'completed',
 ])
 
+export const notificationTypeEnum = pgEnum('notification_type', [
+  'deadline_7d',
+  'deadline_3d',
+  'deadline_1d',
+  'deadline_today',
+  'overdue',
+  'escalation_department',
+  'escalation_management',
+  'approval_request',
+  'approval_decision',
+  'management_request',
+  'daily_summary',
+  'weekly_summary',
+  'monthly_summary',
+  'reminder',
+  'system',
+])
+
+export const managementRequestStatusEnum = pgEnum('management_request_status', [
+  'open',
+  'in_progress',
+  'resolved',
+  'cancelled',
+])
+
+export const managementRequestPriorityEnum = pgEnum('management_request_priority', [
+  'low',
+  'medium',
+  'high',
+  'urgent',
+])
+
 export const companies = pgTable('companies', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
@@ -330,6 +362,92 @@ export const taskDependencies = pgTable(
   ],
 )
 
+export const notifications = pgTable(
+  'notifications',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: notificationTypeEnum('type').notNull(),
+    title: text('title').notNull(),
+    body: text('body').notNull(),
+    entityType: text('entity_type'),
+    entityId: uuid('entity_id'),
+    readAt: timestamp('read_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('notifications_user_idx').on(table.userId),
+    index('notifications_user_read_idx').on(table.userId, table.readAt),
+    index('notifications_created_idx').on(table.createdAt),
+  ],
+)
+
+export const notificationPreferences = pgTable('notification_preferences', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  deadlineAlerts: integer('deadline_alerts').notNull().default(1),
+  escalationAlerts: integer('escalation_alerts').notNull().default(1),
+  approvalAlerts: integer('approval_alerts').notNull().default(1),
+  managementRequestAlerts: integer('management_request_alerts').notNull().default(1),
+  dailySummary: integer('daily_summary').notNull().default(1),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+})
+
+export const deadlineAlertLog = pgTable(
+  'deadline_alert_log',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    taskId: uuid('task_id').references(() => tasks.id, { onDelete: 'cascade' }),
+    alertType: notificationTypeEnum('alert_type').notNull(),
+    alertDate: date('alert_date').notNull(),
+    dedupeKey: text('dedupe_key').notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('deadline_alert_log_user_idx').on(table.userId),
+    index('deadline_alert_log_date_idx').on(table.alertDate),
+  ],
+)
+
+export const managementRequests = pgTable(
+  'management_requests',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    companyId: uuid('company_id')
+      .notNull()
+      .references(() => companies.id, { onDelete: 'cascade' }),
+    requestorId: uuid('requestor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    assigneeId: uuid('assignee_id').references(() => users.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    description: text('description'),
+    priority: managementRequestPriorityEnum('priority').notNull().default('medium'),
+    status: managementRequestStatusEnum('status').notNull().default('open'),
+    responseNotes: text('response_notes'),
+    respondedAt: timestamp('responded_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('management_requests_status_idx').on(table.status),
+    index('management_requests_assignee_idx').on(table.assigneeId),
+    index('management_requests_requestor_idx').on(table.requestorId),
+  ],
+)
+
 export const activityEvents = pgTable(
   'activity_events',
   {
@@ -381,6 +499,13 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   assignedTasks: many(tasks, { relationName: 'assignee' }),
   ownedResponsibilities: many(responsibilities),
   roles: many(userRoles),
+  notifications: many(notifications),
+  notificationPreferences: one(notificationPreferences, {
+    fields: [users.id],
+    references: [notificationPreferences.userId],
+  }),
+  managementRequestsCreated: many(managementRequests, { relationName: 'requestor' }),
+  managementRequestsAssigned: many(managementRequests, { relationName: 'assignee' }),
 }))
 
 export const rolesRelations = relations(roles, ({ many }) => ({
@@ -558,4 +683,33 @@ export const taskDependenciesRelations = relations(taskDependencies, ({ one }) =
 export const activityEventsRelations = relations(activityEvents, ({ one }) => ({
   company: one(companies, { fields: [activityEvents.companyId], references: [companies.id] }),
   actor: one(users, { fields: [activityEvents.actorId], references: [users.id] }),
+}))
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  company: one(companies, { fields: [notifications.companyId], references: [companies.id] }),
+  user: one(users, { fields: [notifications.userId], references: [users.id] }),
+}))
+
+export const notificationPreferencesRelations = relations(notificationPreferences, ({ one }) => ({
+  user: one(users, { fields: [notificationPreferences.userId], references: [users.id] }),
+}))
+
+export const deadlineAlertLogRelations = relations(deadlineAlertLog, ({ one }) => ({
+  company: one(companies, { fields: [deadlineAlertLog.companyId], references: [companies.id] }),
+  user: one(users, { fields: [deadlineAlertLog.userId], references: [users.id] }),
+  task: one(tasks, { fields: [deadlineAlertLog.taskId], references: [tasks.id] }),
+}))
+
+export const managementRequestsRelations = relations(managementRequests, ({ one }) => ({
+  company: one(companies, { fields: [managementRequests.companyId], references: [companies.id] }),
+  requestor: one(users, {
+    fields: [managementRequests.requestorId],
+    references: [users.id],
+    relationName: 'requestor',
+  }),
+  assignee: one(users, {
+    fields: [managementRequests.assigneeId],
+    references: [users.id],
+    relationName: 'assignee',
+  }),
 }))

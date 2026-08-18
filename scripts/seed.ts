@@ -7,6 +7,9 @@ import {
   activityEvents,
   companies,
   departments,
+  managementRequests,
+  notificationPreferences,
+  notifications,
   projectMilestones,
   projectMilestoneTasks,
   projectTeams,
@@ -52,6 +55,13 @@ async function seed() {
   if (reset) {
     await db.execute(sql`
       truncate table
+        deadline_alert_log,
+        notifications,
+        notification_preferences,
+        management_requests,
+        deliverables,
+        task_approvals,
+        task_dependencies,
         activity_events,
         task_attachments,
         task_comments,
@@ -702,6 +712,59 @@ async function seed() {
       action: 'updated',
       summary: 'updated Collect department weekly updates',
       createdAt: new Date(Date.now() - 3 * 60 * 60_000),
+    },
+  ])
+
+  await db.insert(notificationPreferences).values(
+    insertedUsers.map((user) => ({ userId: user.id })),
+  )
+
+  await db.insert(notifications).values([
+    {
+      companyId: company.id,
+      userId: amara.id,
+      type: 'daily_summary',
+      title: 'Daily workspace summary',
+      body: 'Review company-wide delivery, overdue work, and management requests.',
+    },
+    {
+      companyId: company.id,
+      userId: nia.id,
+      type: 'deadline_3d',
+      title: 'Deadline in 3 days',
+      body: 'Client onboarding checklist is due in three days.',
+      entityType: 'task',
+      entityId: byTitle['Update client onboarding checklist'].id,
+    },
+    {
+      companyId: company.id,
+      userId: david.id,
+      type: 'escalation_department',
+      title: 'Department escalation',
+      body: 'Payroll reconciliation is overdue in Finance/Admin.',
+      entityType: 'task',
+      entityId: byTitle['Resolve payroll reconciliation'].id,
+    },
+  ])
+
+  await db.insert(managementRequests).values([
+    {
+      companyId: company.id,
+      requestorId: nia.id,
+      assigneeId: amara.id,
+      title: 'Approve Q3 campaign budget',
+      description: 'Need executive sign-off before the communications rollout.',
+      priority: 'high',
+      status: 'open',
+    },
+    {
+      companyId: company.id,
+      requestorId: david.id,
+      assigneeId: amara.id,
+      title: 'Confirm intern onboarding capacity',
+      description: 'Digital Technology needs guidance on intern placement for August.',
+      priority: 'medium',
+      status: 'in_progress',
     },
   ])
 

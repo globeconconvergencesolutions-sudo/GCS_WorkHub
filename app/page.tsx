@@ -66,6 +66,10 @@ export default async function Page({
       currentUserRoles={currentUserRoles}
       initialView={params.view as DashboardProps['initialView']}
       myTaskCount={dashboardData.myTaskCount}
+      initialNotifications={dashboardData.notifications as DashboardProps['initialNotifications']}
+      unreadNotificationCount={dashboardData.unreadNotificationCount}
+      managementRequests={dashboardData.managementRequests as DashboardProps['managementRequests']}
+      notificationPreferences={dashboardData.notificationPreferences as DashboardProps['notificationPreferences']}
     />
   )
 }

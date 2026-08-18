@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import { ACTIVE_TASK_STATUSES, ATTENTION_STATUSES } from '@/lib/constants'
 import { getDb } from '@/lib/db'
 import {
