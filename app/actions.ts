@@ -1708,8 +1708,6 @@ export async function sendWorkspaceReminder(input: { userId: string; message: st
   return { ok: true }
 }
 
-import { getInviteStarterPassword } from '@/lib/env'
-
 export async function inviteEmployee(formData: FormData) {
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' }

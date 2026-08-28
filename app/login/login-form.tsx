@@ -124,8 +124,6 @@ export function LoginForm({ callbackUrl }: { callbackUrl: string }) {
         )}
       </button>
 
-      </button>
-
       <p className="auth-signup">
         Don&apos;t have an account?{' '}
         <button
