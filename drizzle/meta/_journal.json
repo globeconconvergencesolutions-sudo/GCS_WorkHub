@@ -50,6 +50,27 @@
       "when": 1787047374851,
       "tag": "0006_aberrant_omega_flight",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787909227242,
+      "tag": "0007_nervous_wonder_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787911341113,
+      "tag": "0008_abandoned_deathstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787914440662,
+      "tag": "0009_serious_puma",
+      "breakpoints": true
     }
   ]
 }

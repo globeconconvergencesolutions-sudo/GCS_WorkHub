@@ -10,7 +10,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx scripts/seed.ts",
-    "db:setup": "pnpm db:generate && pnpm db:migrate && pnpm db:seed"
+    "db:setup": "pnpm db:generate && pnpm db:migrate && pnpm db:seed",
+    "test:permissions": "tsx lib/auth/permissions.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

@@ -6,7 +6,7 @@ import { getUserByEmail } from '@/lib/db/queries'
 
 function getRoleLandingUrl(roleKeys: string[]) {
   if (roleKeys.includes('admin') || roleKeys.includes('managing_director')) {
-    return '/?view=Reports'
+    return '/?view=Home'
   }
   if (roleKeys.includes('department_head') || roleKeys.includes('manager')) {
     return '/?view=Departments'

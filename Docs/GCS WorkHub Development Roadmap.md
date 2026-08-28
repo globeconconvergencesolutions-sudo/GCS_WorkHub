@@ -234,6 +234,16 @@ Reduce manual follow-up through automation and proactive alerts.
 
 ---
 
+# Phase 3.5: Role tightening & reporting hub
+
+Do this **before** Phase 4. Full sequence, locked role defaults, permission kernel, and PR order:
+
+[GCS WorkHub Role Tightening Plan.md](./GCS%20WorkHub%20Role%20Tightening%20Plan.md)
+
+Do not start capacity, KPIs, clients, or AI until Waves 0–3 in that plan are done.
+
+---
+
 # Phase 4: Workload & Resource Management
 
 ## Objective

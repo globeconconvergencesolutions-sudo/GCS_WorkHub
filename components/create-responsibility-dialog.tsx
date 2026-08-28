@@ -5,7 +5,7 @@ import { useFormStatus } from 'react-dom'
 import { X } from 'lucide-react'
 import { createResponsibility } from '@/app/actions'
 import { Button } from '@/components/ui/button'
-import { TASK_CATEGORY_LABELS } from '@/lib/constants'
+import { CategoryField } from '@/components/category-field'
 import type { Person } from '@/lib/types'
 
 function SubmitButton() {
@@ -29,10 +29,12 @@ export function CreateResponsibilityDialog({
   onClose: () => void
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [category, setCategory] = useState('operational')
+  const [categoryCustom, setCategoryCustom] = useState('')
 
   async function action(formData: FormData) {
     const result = await createResponsibility(formData)
-    if (result?.error) {
+    if (result && 'error' in result && result.error) {
       setError(result.error)
       return
     }
@@ -62,7 +64,7 @@ export function CreateResponsibilityDialog({
           <input id="resp-title" name="title" autoFocus required placeholder="e.g. Client delivery quality" />
           <div className="form-grid">
             <label>
-              Owner
+              Led by
               <select name="ownerId" defaultValue={currentUserId}>
                 {people.map((person) => (
                   <option key={person.id} value={person.id}>
@@ -71,16 +73,14 @@ export function CreateResponsibilityDialog({
                 ))}
               </select>
             </label>
-            <label>
-              Category
-              <select name="category" defaultValue="operational">
-                {Object.entries(TASK_CATEGORY_LABELS).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <CategoryField
+              value={category}
+              customValue={categoryCustom}
+              onChange={(nextCategory, nextCustom) => {
+                setCategory(nextCategory)
+                setCategoryCustom(nextCustom)
+              }}
+            />
             <label>
               Department
               <select name="departmentId" defaultValue="">

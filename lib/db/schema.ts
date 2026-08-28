@@ -31,6 +31,7 @@ export const taskCategoryEnum = pgEnum('task_category', [
   'business_development',
   'support',
   'project',
+  'other',
 ])
 export const responsibilityStatusEnum = pgEnum('responsibility_status', [
   'active',
@@ -38,7 +39,7 @@ export const responsibilityStatusEnum = pgEnum('responsibility_status', [
   'completed',
 ])
 
-export const projectStatusEnum = pgEnum('project_status', ['active', 'paused', 'completed'])
+export const projectStatusEnum = pgEnum('project_status', ['active', 'paused', 'completed', 'archived'])
 
 export const projectMilestoneStatusEnum = pgEnum('project_milestone_status', [
   'planned',
@@ -63,6 +64,8 @@ export const notificationTypeEnum = pgEnum('notification_type', [
   'reminder',
   'system',
 ])
+
+export const managementRequestKindEnum = pgEnum('management_request_kind', ['leadership', 'work'])
 
 export const managementRequestStatusEnum = pgEnum('management_request_status', [
   'open',
@@ -218,6 +221,7 @@ export const tasks = pgTable(
     title: text('title').notNull(),
     description: text('description'),
     category: taskCategoryEnum('category').notNull().default('operational'),
+    categoryCustom: text('category_custom'),
     priority: taskPriorityEnum('priority').notNull().default('medium'),
     status: taskStatusEnum('status').notNull().default('not_started'),
     progress: integer('progress').notNull().default(0),
@@ -435,6 +439,7 @@ export const managementRequests = pgTable(
     title: text('title').notNull(),
     description: text('description'),
     priority: managementRequestPriorityEnum('priority').notNull().default('medium'),
+    kind: managementRequestKindEnum('kind').notNull().default('leadership'),
     status: managementRequestStatusEnum('status').notNull().default('open'),
     responseNotes: text('response_notes'),
     respondedAt: timestamp('responded_at', { withTimezone: true }),
@@ -483,6 +488,7 @@ export const departmentsRelations = relations(departments, ({ one, many }) => ({
   users: many(users),
   tasks: many(tasks),
   responsibilities: many(responsibilities),
+  projects: many(projects),
 }))
 
 export const teamsRelations = relations(teams, ({ one, many }) => ({
@@ -555,6 +561,7 @@ export const projects = pgTable(
     ownerId: uuid('owner_id')
       .notNull()
       .references(() => users.id, { onDelete: 'restrict' }),
+    departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
     description: text('description'),
     status: projectStatusEnum('status').notNull().default('active'),
@@ -565,6 +572,7 @@ export const projects = pgTable(
   (table) => [
     index('projects_owner_idx').on(table.ownerId),
     index('projects_company_idx').on(table.companyId),
+    index('projects_department_idx').on(table.departmentId),
   ],
 )
 
@@ -621,6 +629,7 @@ export const projectMilestoneTasks = pgTable(
 
 export const projectsRelations = relations(projects, ({ one, many }) => ({
   owner: one(users, { fields: [projects.ownerId], references: [users.id] }),
+  department: one(departments, { fields: [projects.departmentId], references: [departments.id] }),
   teams: many(projectTeams),
   milestones: many(projectMilestones),
 }))

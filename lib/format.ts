@@ -1,5 +1,7 @@
-import { TASK_CATEGORY_LABELS, TASK_STATUS_LABELS } from '@/lib/constants'
-import type { taskCategoryEnum, taskStatusEnum } from '@/lib/db/schema'
+import { TASK_STATUS_LABELS } from '@/lib/constants'
+import type { taskStatusEnum } from '@/lib/db/schema'
+
+export { categoryLabel, ledBy } from '@/lib/category'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -62,10 +64,6 @@ export function fullName(user: { firstName: string; lastName: string }) {
 
 export function statusLabel(status: (typeof taskStatusEnum.enumValues)[number]) {
   return TASK_STATUS_LABELS[status]
-}
-
-export function categoryLabel(category: (typeof taskCategoryEnum.enumValues)[number]) {
-  return TASK_CATEGORY_LABELS[category]
 }
 
 export function statusClass(status: (typeof taskStatusEnum.enumValues)[number]) {

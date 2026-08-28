@@ -5,7 +5,9 @@ function badgeClass(status: string) {
   const normalized = status.toLowerCase().replaceAll('_', ' ').replaceAll(' ', '-')
   if (normalized.includes('progress') || normalized === 'in-progress') return 'status-in-progress'
   if (normalized === 'active' || normalized === 'on-track' || normalized === 'complete') return 'status-completed'
-  if (normalized === 'at-risk' || normalized === 'needs-review' || normalized === 'blocked') return 'status-blocked'
+  if (normalized === 'in-motion') return 'status-in-progress'
+  if (normalized === 'no-work-yet' || normalized === 'idle') return 'status-not-started'
+  if (normalized === 'at-risk' || normalized === 'needs-review' || normalized === 'needs-attention' || normalized === 'blocked') return 'status-blocked'
   if (normalized === 'waiting' || normalized === 'pending') return 'status-waiting'
   if (normalized === 'pending-approval') return 'status-pending-approval'
   if (normalized === 'not-started') return 'status-not-started'

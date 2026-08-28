@@ -1,6 +1,6 @@
-import { and, asc, desc, eq, gte, inArray, lte, ne, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm'
 import { auth } from '@/auth'
-import { ACTIVE_TASK_STATUSES, ATTENTION_STATUSES } from '@/lib/constants'
+import { ACTIVE_TASK_STATUSES } from '@/lib/constants'
 import { getDb } from '@/lib/db'
 import {
   activityEvents,
@@ -14,19 +14,21 @@ import {
   tasks,
   users,
   teams,
+  notifications,
+  notificationPreferences,
+  managementRequests,
 } from '@/lib/db/schema'
 import { isOverdue } from '@/lib/format'
 import type { CurrentUser } from '@/lib/types'
+import { ensureNotificationPreferences, syncDeadlineAlertsForUser } from '@/lib/notifications/sync-alerts'
+import {
+  canManageOrg,
+  canSeeTask,
+  isDepartmentLeader,
+  isManagement,
+} from '@/lib/auth/permissions'
+import { buildReport } from '@/lib/reporting/build-report'
 
-function isoDate(date = new Date()) {
-  return date.toISOString().slice(0, 10)
-}
-
-function addDays(days: number, from = new Date()) {
-  const next = new Date(from)
-  next.setDate(next.getDate() + days)
-  return isoDate(next)
-}
 
 export async function getCompany() {
   const [company] = await getDb().select().from(companies).limit(1)
@@ -53,26 +55,6 @@ export async function getUserByEmail(email: string) {
   })
 }
 
-function roleKeys(user: CurrentUser | null) {
-  return user?.roles?.map((entry) => entry.role.key) ?? []
-}
-
-function isManagement(user: CurrentUser | null) {
-  const keys = new Set(roleKeys(user))
-  return keys.has('admin') || keys.has('managing_director')
-}
-
-function isDepartmentLeader(user: CurrentUser | null) {
-  const keys = new Set(roleKeys(user))
-  return keys.has('department_head') || keys.has('manager')
-}
-
-function canSeeTask(user: CurrentUser | null, task: { assigneeId: string | null; departmentId: string | null }) {
-  if (!user) return false
-  if (isManagement(user)) return true
-  if (isDepartmentLeader(user) && user.departmentId && task.departmentId === user.departmentId) return true
-  return task.assigneeId === user.id
-}
 
 export async function getCurrentUser() {
   const session = await auth()
@@ -90,7 +72,7 @@ export async function getWorkspaceContext() {
 
 export async function listPeople(viewer?: CurrentUser | null) {
   const rows = await getDb().query.users.findMany({
-    where: eq(users.status, 'active'),
+    where: viewer && isManagement(viewer) ? undefined : eq(users.status, 'active'),
     with: {
       department: true,
       manager: true,
@@ -201,27 +183,68 @@ export async function listResponsibilities(options?: { ownerId?: string; viewer?
 }
 
 export async function listActivity(limit = 12, viewer?: CurrentUser | null) {
+  const fetchLimit = viewer && !isManagement(viewer) ? Math.min(Math.max(limit * 8, 80), 240) : limit
   const rows = await getDb().query.activityEvents.findMany({
     with: { actor: true },
     orderBy: [desc(activityEvents.createdAt)],
-    limit,
+    limit: fetchLimit,
   })
 
-  if (!viewer) return rows
-  if (isManagement(viewer)) return rows
-  if (isDepartmentLeader(viewer) && viewer.departmentId) {
-    return rows.filter((row) => row.actor?.departmentId === viewer.departmentId || row.actorId === viewer.id)
-  }
-  return rows.filter((row) => row.actorId === viewer.id)
+  if (!viewer || isManagement(viewer)) return rows.slice(0, limit)
+
+  const taskIds = [...new Set(rows.filter((row) => row.entityType === 'task' && row.entityId).map((row) => row.entityId!))]
+  const projectIds = [
+    ...new Set(rows.filter((row) => row.entityType === 'project' && row.entityId).map((row) => row.entityId!)),
+  ]
+  const [taskRows, projectRows] = await Promise.all([
+    taskIds.length
+      ? getDb().select({ id: tasks.id, departmentId: tasks.departmentId, assigneeId: tasks.assigneeId }).from(tasks).where(inArray(tasks.id, taskIds))
+      : Promise.resolve([]),
+    projectIds.length
+      ? getDb()
+          .select({ id: projects.id, departmentId: projects.departmentId, ownerId: projects.ownerId })
+          .from(projects)
+          .where(inArray(projects.id, projectIds))
+      : Promise.resolve([]),
+  ])
+  const taskById = new Map(taskRows.map((row) => [row.id, row]))
+  const projectById = new Map(projectRows.map((row) => [row.id, row]))
+
+  const visible = rows.filter((row) => {
+    if (row.actorId === viewer.id) return true
+    if (isDepartmentLeader(viewer) && viewer.departmentId) {
+      if (row.actor?.departmentId === viewer.departmentId) return true
+      const task = row.entityType === 'task' && row.entityId ? taskById.get(row.entityId) : null
+      if (task?.departmentId === viewer.departmentId) return true
+      const project = row.entityType === 'project' && row.entityId ? projectById.get(row.entityId) : null
+      if (project?.departmentId === viewer.departmentId) return true
+      return false
+    }
+    const task = row.entityType === 'task' && row.entityId ? taskById.get(row.entityId) : null
+    return Boolean(task && canSeeTask(viewer, task))
+  })
+
+  return visible.slice(0, limit)
 }
 
 export async function getDashboardData(user: CurrentUser) {
+  const company = await getCompany()
+  if (company) {
+    await ensureNotificationPreferences(user.id)
+    await syncDeadlineAlertsForUser(user, company.id)
+  }
+
   const overview = await getOverviewData(user)
-  const [responsibilities, allActivity, allTasks] = await Promise.all([
-    listResponsibilities({ viewer: user }),
-    listActivity(20, user),
-    listTasks({ viewer: user }),
-  ])
+  const [responsibilities, allActivity, allTasks, notificationsList, unreadNotificationCount, managementRequestsList, notificationPrefs] =
+    await Promise.all([
+      listResponsibilities({ viewer: user }),
+      listActivity(20, user),
+      listTasks({ viewer: user }),
+      listNotifications(user.id, 25),
+      getUnreadNotificationCount(user.id),
+      listManagementRequests(user),
+      getNotificationPreferences(user.id),
+    ])
 
   const myTasks = allTasks.filter((task) => task.assigneeId === user.id)
   const myActive = myTasks.filter(
@@ -230,7 +253,7 @@ export async function getDashboardData(user: CurrentUser) {
   const myCompleted = myTasks.filter((task) => task.status === 'completed')
   const myInProgress = myTasks.filter((task) => task.status === 'in_progress')
 
-  const projects = await listProjects({ limit: 3, viewer: user })
+  const projects = await listProjects({ viewer: user })
 
   return {
     ...overview,
@@ -244,14 +267,16 @@ export async function getDashboardData(user: CurrentUser) {
       completed: myCompleted.length,
     },
     projects,
-    reportMetrics: {
-      completionRate: overview.metrics.completionRate,
-      overdue: overview.metrics.overdue,
-      activeProjects: projects.length,
-      teamCoverage: overview.people.length
-        ? Math.round((overview.people.filter((p) => p.departmentId).length / overview.people.length) * 100)
-        : 0,
-    },
+    reportMetrics: buildReport({
+      tasks: allTasks,
+      departments: overview.departments,
+      projects,
+      people: overview.people,
+    }),
+    notifications: notificationsList,
+    unreadNotificationCount,
+    managementRequests: managementRequestsList,
+    notificationPreferences: notificationPrefs,
   }
 }
 
@@ -259,6 +284,7 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
   const rows = await getDb().query.projects.findMany({
     with: {
       owner: { with: { department: true } },
+      department: true,
       teams: { with: { user: true } },
       milestones: {
         with: {
@@ -278,33 +304,120 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
     if (isManagement(viewer)) return true
     if (project.ownerId === viewer.id) return true
     if (project.teams.some((entry) => entry.userId === viewer.id)) return true
-    if (isDepartmentLeader(viewer) && viewer.departmentId && project.owner?.departmentId === viewer.departmentId) return true
+    const homeDepartmentId = project.departmentId ?? project.owner?.departmentId ?? null
+    if (isDepartmentLeader(viewer) && viewer.departmentId && homeDepartmentId === viewer.departmentId) return true
     return false
   })
+
+  const projectIds = filteredRows.map((project) => project.id)
+  const linkedTaskIds = [
+    ...new Set(
+      filteredRows.flatMap((project) =>
+        project.milestones.flatMap((milestone) => milestone.milestoneTasks.map((entry) => entry.task.id)),
+      ),
+    ),
+  ]
+  const activityRows =
+    projectIds.length === 0
+      ? []
+      : await getDb().query.activityEvents.findMany({
+          where: or(
+            and(eq(activityEvents.entityType, 'project'), inArray(activityEvents.entityId, projectIds)),
+            linkedTaskIds.length
+              ? and(eq(activityEvents.entityType, 'task'), inArray(activityEvents.entityId, linkedTaskIds))
+              : and(eq(activityEvents.entityType, 'project'), inArray(activityEvents.entityId, projectIds)),
+          ),
+          with: { actor: true },
+          orderBy: [desc(activityEvents.createdAt)],
+          limit: 400,
+        })
 
   return filteredRows.map((project) => {
     const allMilestoneTasks = project.milestones.flatMap((m) => m.milestoneTasks)
     const total = allMilestoneTasks.length
     const completed = allMilestoneTasks.filter((mt) => mt.task.status === 'completed').length
     const progress = total === 0 ? project.progress : Math.round((completed / total) * 100)
-    const status =
-      progress >= 80 ? 'On track' : progress >= 50 ? 'At risk' : 'Needs review'
+    const overdueCount = allMilestoneTasks.filter((mt) => isOverdue(mt.task.dueDate, mt.task.status)).length
+    const blockedCount = allMilestoneTasks.filter(
+      (mt) => mt.task.status === 'blocked' || mt.task.status === 'pending_approval',
+    ).length
+    const health =
+      total === 0
+        ? 'No linked work'
+        : progress >= 80 && overdueCount === 0
+          ? 'On track'
+          : progress >= 50
+            ? 'At risk'
+            : 'Needs review'
+    const risk =
+      overdueCount > 0 ? 'High risk' : blockedCount > 0 ? 'Medium risk' : progress < 50 ? 'Watch closely' : 'Low risk'
+    const nextMilestone = [...project.milestones]
+      .filter((milestone) => milestone.dueDate)
+      .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))[0]
+    const taskIdSet = new Set(allMilestoneTasks.map((entry) => entry.task.id))
+    const activity = activityRows
+      .filter(
+        (event) =>
+          (event.entityType === 'project' && event.entityId === project.id) ||
+          (event.entityType === 'task' && event.entityId !== null && taskIdSet.has(event.entityId)),
+      )
+      .slice(0, 12)
+      .map((event) => ({
+        id: event.id,
+        action: event.action,
+        summary: event.summary,
+        createdAt: event.createdAt,
+        actor: event.actor
+          ? {
+              initials: event.actor.initials,
+              firstName: event.actor.firstName,
+              lastName: event.actor.lastName,
+            }
+          : null,
+      }))
 
     return {
       id: project.id,
       title: project.title,
+      description: project.description,
       owner: project.owner ? `${project.owner.firstName} ${project.owner.lastName}` : 'Unassigned',
+      ownerId: project.ownerId,
+      departmentId: project.departmentId ?? project.owner?.departmentId ?? null,
+      department: project.department?.name ?? project.owner?.department?.name ?? null,
+      projectStatus: project.status,
       progress,
-      status,
+      completionRate: progress,
+      status: health === 'No linked work' ? 'On track' : health,
+      health,
+      risk,
+      overdueCount,
+      blockedCount,
+      milestoneCount: project.milestones.length,
+      nextMilestone: nextMilestone?.title ?? 'No milestone scheduled',
+      nextMilestoneDue: nextMilestone?.dueDate ?? null,
       tasks: `${completed} / ${total}`,
+      taskIds: allMilestoneTasks.map((entry) => entry.task.id),
+      activity,
+      milestones: project.milestones.map((milestone) => ({
+        id: milestone.id,
+        title: milestone.title,
+        status: milestone.status,
+        startDate: milestone.startDate,
+        dueDate: milestone.dueDate,
+        progress: milestone.progress,
+        taskIds: milestone.milestoneTasks.map((entry) => entry.task.id),
+      })),
+      team: project.teams.map((entry) => ({
+        id: entry.user.id,
+        firstName: entry.user.firstName,
+        lastName: entry.user.lastName,
+        initials: entry.user.initials,
+      })),
     }
   })
 }
 
 export async function getOverviewData(user: CurrentUser) {
-  const today = isoDate()
-  const weekEnd = addDays(7)
-
   const [allTasks, departmentRows, activity, myResponsibilities, people] = await Promise.all([
     listTasks({ viewer: user }),
     listDepartments(user),
@@ -313,28 +426,27 @@ export async function getOverviewData(user: CurrentUser) {
     listPeople(user),
   ])
 
-  const activeTasks = allTasks.filter((task) => ACTIVE_TASK_STATUSES.includes(task.status as (typeof ACTIVE_TASK_STATUSES)[number]))
-  const dueThisWeek = activeTasks.filter((task) => task.dueDate && task.dueDate >= today && task.dueDate <= weekEnd)
-  const dueToday = activeTasks.filter((task) => task.dueDate === today)
-  const overdue = activeTasks.filter((task) => isOverdue(task.dueDate, task.status))
-  const blocked = activeTasks.filter((task) => ATTENTION_STATUSES.includes(task.status as (typeof ATTENTION_STATUSES)[number]))
-  const completed = allTasks.filter((task) => task.status === 'completed')
-  const completionRate = allTasks.length === 0 ? 0 : Math.round((completed.length / allTasks.length) * 100)
-  const upcoming = [...activeTasks]
-    .filter((task) => task.dueDate)
-    .sort((a, b) => (a.dueDate ?? '').localeCompare(b.dueDate ?? ''))
+  const report = buildReport({
+    tasks: allTasks,
+    departments: departmentRows,
+    projects: [],
+    people,
+  })
+  const upcoming = [...allTasks]
+    .filter((task) => task.dueDate && ACTIVE_TASK_STATUSES.includes(task.status as (typeof ACTIVE_TASK_STATUSES)[number]))
+    .sort((a, b) => String(a.dueDate ?? '').localeCompare(String(b.dueDate ?? '')))
     .slice(0, 4)
 
   return {
     metrics: {
-      active: activeTasks.length,
+      active: report.active,
       departments: departmentRows.length,
-      dueThisWeek: dueThisWeek.length,
-      dueToday: dueToday.length,
-      attention: overdue.length + blocked.length,
-      overdue: overdue.length,
-      blocked: blocked.length,
-      completionRate,
+      dueThisWeek: report.dueThisWeek,
+      dueToday: report.dueToday,
+      attention: report.attention,
+      overdue: report.overdue,
+      blocked: report.blocked,
+      completionRate: report.completionRate,
     },
     tasks: allTasks,
     departments: departmentRows,
@@ -350,9 +462,14 @@ export async function listRoles() {
   return getDb().select().from(roles).orderBy(asc(roles.rank))
 }
 
-export async function getSettingsData() {
-  const currentUser = await getCurrentUser()
-  if (!currentUser || !isManagement(currentUser)) {
+export async function getSettingsData(viewer?: CurrentUser | null) {
+  const currentUser = viewer ?? (await getCurrentUser())
+  if (!currentUser) {
+    return { company: null, people: [], roles: [], departments: [], teams: [] }
+  }
+
+  const canSeeStructure = isManagement(currentUser) || isDepartmentLeader(currentUser) || canManageOrg(currentUser)
+  if (!canSeeStructure) {
     return { company: null, people: [], roles: [], departments: [], teams: [] }
   }
 
@@ -364,7 +481,79 @@ export async function getSettingsData() {
     getDb().query.teams.findMany({ with: { department: true }, orderBy: [asc(teams.name)] }),
   ])
 
-  return { company, people, roles: roleRows, departments: departmentRows, teams: teamRows }
+  const departmentsScoped = isManagement(currentUser)
+    ? departmentRows
+    : departmentRows.filter((row) => row.id === currentUser.departmentId)
+  const teamsScoped = isManagement(currentUser)
+    ? teamRows
+    : teamRows.filter((row) => row.departmentId === currentUser.departmentId)
+
+  return {
+    company,
+    people,
+    roles: roleRows,
+    departments: departmentsScoped,
+    teams: teamsScoped,
+  }
 }
 
-export { or, and, eq, gte, lte, ne, inArray, sql, taskComments, responsibilityAssignees }
+export async function listNotifications(userId: string, limit = 20) {
+  return getDb().query.notifications.findMany({
+    where: eq(notifications.userId, userId),
+    orderBy: [desc(notifications.createdAt)],
+    limit,
+  })
+}
+
+export async function getUnreadNotificationCount(userId: string) {
+  const rows = await getDb()
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
+
+  return rows.length
+}
+
+export async function getNotificationPreferences(userId: string) {
+  const [prefs] = await getDb()
+    .select()
+    .from(notificationPreferences)
+    .where(eq(notificationPreferences.userId, userId))
+    .limit(1)
+
+  return (
+    prefs ?? {
+      userId,
+      deadlineAlerts: 1,
+      escalationAlerts: 1,
+      approvalAlerts: 1,
+      managementRequestAlerts: 1,
+      dailySummary: 1,
+      updatedAt: new Date(),
+    }
+  )
+}
+
+export async function listManagementRequests(viewer: CurrentUser) {
+  const rows = await getDb().query.managementRequests.findMany({
+    with: {
+      requestor: true,
+      assignee: true,
+    },
+    orderBy: [desc(managementRequests.createdAt)],
+    limit: 20,
+  })
+
+  if (isManagement(viewer)) return rows
+  if (isDepartmentLeader(viewer)) {
+    return rows.filter(
+      (row) =>
+        row.requestorId === viewer.id ||
+        row.assigneeId === viewer.id ||
+        row.requestor?.departmentId === viewer.departmentId,
+    )
+  }
+  return rows.filter((row) => row.requestorId === viewer.id || row.assigneeId === viewer.id)
+}
+
+export { or, and, eq, gte, lte, ne, inArray, isNull, sql, taskComments, responsibilityAssignees }

@@ -10,9 +10,12 @@ declare module 'next-auth' {
   interface Session {
     user: {
       id: string
+      name?: string | null
+      email?: string | null
+      image?: string | null
       roleKeys: string[]
       departmentId: string | null
-    } & NonNullable<Session['user']>
+    }
   }
 }
 

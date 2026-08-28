@@ -81,14 +81,20 @@ async function createAlertIfNew(input: {
 
   if (existing[0]) return false
 
-  await db.insert(deadlineAlertLog).values({
-    companyId: input.companyId,
-    userId: input.userId,
-    taskId: input.taskId ?? null,
-    alertType: input.type,
-    alertDate: input.alertDate,
-    dedupeKey: key,
-  })
+  const inserted = await db
+    .insert(deadlineAlertLog)
+    .values({
+      companyId: input.companyId,
+      userId: input.userId,
+      taskId: input.taskId ?? null,
+      alertType: input.type,
+      alertDate: input.alertDate,
+      dedupeKey: key,
+    })
+    .onConflictDoNothing()
+    .returning({ id: deadlineAlertLog.id })
+
+  if (!inserted[0]) return false
 
   await db.insert(notifications).values({
     companyId: input.companyId,

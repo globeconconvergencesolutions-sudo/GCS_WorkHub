@@ -35,6 +35,11 @@ if (!url) {
 
 const db = drizzle({ client: neon(url) })
 
+const STAFF_PASSWORD = 'Workhub123!'
+const ADMIN_EMAIL = 'tonyouh@gmail.com'
+const ADMIN_PASSWORD = 'Globecon@2026'
+const MD_EMAIL = 'md@globeconcs.com'
+
 function isoDate(daysFromToday: number, from = new Date()) {
   const date = new Date(from)
   date.setHours(12, 0, 0, 0)
@@ -42,13 +47,97 @@ function isoDate(daysFromToday: number, from = new Date()) {
   return date.toISOString().slice(0, 10)
 }
 
+async function roleIdByKey(key: string) {
+  const [role] = await db.select().from(roles).where(eq(roles.key, key)).limit(1)
+  if (!role) throw new Error(`Role "${key}" is missing. Run seed with --reset once.`)
+  return role.id
+}
+
+async function setPrimaryRole(userId: string, roleKey: string) {
+  await db.delete(userRoles).where(eq(userRoles.userId, userId))
+  await db.insert(userRoles).values({ userId, roleId: await roleIdByKey(roleKey) })
+}
+
+function printLoginRoster() {
+  console.log('')
+  console.log('Sign-in roster (roles match the permission kernel)')
+  console.log(`  Admin (org, people, grant any role)  ${ADMIN_EMAIL}  /  ${ADMIN_PASSWORD}`)
+  console.log(`  MD (company cockpit, no org CRUD)    ${MD_EMAIL}  /  ${STAFF_PASSWORD}`)
+  console.log(`  Department heads / staff             work emails  /  ${STAFF_PASSWORD}`)
+}
+
+async function syncPrivilegedAccounts() {
+  const [company] = await db.select().from(companies).limit(1)
+  if (!company) return false
+
+  const [mdDepartment] = await db.select().from(departments).where(eq(departments.slug, 'md')).limit(1)
+  const [execTeam] = mdDepartment
+    ? await db.select().from(teams).where(eq(teams.departmentId, mdDepartment.id)).limit(1)
+    : [null]
+  const [md] = await db.select().from(users).where(eq(users.email, MD_EMAIL)).limit(1)
+  const adminHash = await bcrypt.hash(ADMIN_PASSWORD, 10)
+
+  const [existingAdmin] = await db.select().from(users).where(eq(users.email, ADMIN_EMAIL)).limit(1)
+  let adminId = existingAdmin?.id
+  if (existingAdmin) {
+    await db
+      .update(users)
+      .set({
+        firstName: 'Tony',
+        lastName: 'Ouh',
+        jobTitle: 'Workspace Administrator',
+        initials: 'TO',
+        avatarColor: 'navy',
+        status: 'active',
+        passwordHash: adminHash,
+        departmentId: mdDepartment?.id ?? existingAdmin.departmentId,
+        teamId: execTeam?.id ?? existingAdmin.teamId,
+        managerId: md?.id ?? existingAdmin.managerId,
+      })
+      .where(eq(users.id, existingAdmin.id))
+  } else {
+    const [created] = await db
+      .insert(users)
+      .values({
+        companyId: company.id,
+        departmentId: mdDepartment?.id ?? null,
+        teamId: execTeam?.id ?? null,
+        managerId: md?.id ?? null,
+        email: ADMIN_EMAIL,
+        firstName: 'Tony',
+        lastName: 'Ouh',
+        jobTitle: 'Workspace Administrator',
+        passwordHash: adminHash,
+        initials: 'TO',
+        avatarColor: 'navy',
+        status: 'active',
+      })
+      .returning()
+    adminId = created.id
+    await db.insert(notificationPreferences).values({ userId: created.id })
+  }
+
+  if (!adminId) throw new Error('Admin account could not be created.')
+  await setPrimaryRole(adminId, 'admin')
+
+  if (md) {
+    await setPrimaryRole(md.id, 'managing_director')
+  }
+
+  return true
+}
+
 async function seed() {
-  const defaultPasswordHash = await bcrypt.hash('Workhub123!', 10)
+  const defaultPasswordHash = await bcrypt.hash(STAFF_PASSWORD, 10)
+  const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10)
   const reset = process.argv.includes('--reset')
   const existing = await db.select({ id: companies.id }).from(companies).limit(1)
 
   if (existing.length && !reset) {
-    console.log('Workspace already has data. Re-run with --reset to replace the seed.')
+    await syncPrivilegedAccounts()
+    console.log('Workspace already has data. Admin and MD accounts were aligned to the permission kernel.')
+    console.log('Re-run with --reset only if you want a full demo wipe.')
+    printLoginRoster()
     return
   }
 
@@ -149,6 +238,18 @@ async function seed() {
         jobTitle: 'MD',
         passwordHash: defaultPasswordHash,
         initials: 'AW',
+        avatarColor: 'navy',
+      },
+      {
+        companyId: company.id,
+        departmentId: dept.md.id,
+        teamId: teamByName['Executive Office'],
+        email: ADMIN_EMAIL,
+        firstName: 'Tony',
+        lastName: 'Ouh',
+        jobTitle: 'Workspace Administrator',
+        passwordHash: adminPasswordHash,
+        initials: 'TO',
         avatarColor: 'navy',
       },
       {
@@ -262,7 +363,8 @@ async function seed() {
     ])
     .returning()
 
-  const amara = insertedUsers.find((user) => user.email === 'md@globeconcs.com')!
+  const amara = insertedUsers.find((user) => user.email === MD_EMAIL)!
+  const tony = insertedUsers.find((user) => user.email === ADMIN_EMAIL)!
   const nia = insertedUsers.find((user) => user.email === 'patrick@globeconcs.com')!
   const david = insertedUsers.find((user) => user.email === 'victor@globeconcs.com')!
   const james = insertedUsers.find((user) => user.email === 'calvin@globeoncs.com')!
@@ -276,6 +378,7 @@ async function seed() {
   await db.update(users).set({ managerId: amara.id }).where(ne(users.id, amara.id))
   await db.update(users).set({ managerId: nia.id }).where(eq(users.id, kwame.id))
   await db.update(users).set({ managerId: amara.id }).where(eq(users.id, sofia.id))
+  await db.update(users).set({ managerId: amara.id }).where(eq(users.id, tony.id))
 
   await db.update(departments).set({ ownerId: nia.id }).where(eq(departments.id, dept.operations.id))
   await db.update(departments).set({ ownerId: david.id }).where(eq(departments.id, dept.technology.id))
@@ -286,13 +389,12 @@ async function seed() {
 
   await db.insert(userRoles).values([
     { userId: amara.id, roleId: roleByKey.managing_director },
-    { userId: amara.id, roleId: roleByKey.admin },
+    { userId: tony.id, roleId: roleByKey.admin },
     { userId: nia.id, roleId: roleByKey.department_head },
     { userId: david.id, roleId: roleByKey.department_head },
     { userId: james.id, roleId: roleByKey.department_head },
     { userId: lina.id, roleId: roleByKey.department_head },
     { userId: sofia.id, roleId: roleByKey.department_head },
-    { userId: sofia.id, roleId: roleByKey.employee },
     { userId: kwame.id, roleId: roleByKey.employee },
     { userId: krystal.id, roleId: roleByKey.employee },
     { userId: john.id, roleId: roleByKey.employee },
@@ -534,6 +636,7 @@ async function seed() {
       {
         companyId: company.id,
         ownerId: amara.id,
+        departmentId: dept.operations.id,
         title: `${dept.operations.name} delivery`,
         description: 'Managed delivery track for Operations outcomes.',
         status: 'active',
@@ -542,6 +645,7 @@ async function seed() {
       {
         companyId: company.id,
         ownerId: nia.id,
+        departmentId: dept.technology.id,
         title: `${dept.technology.name} delivery`,
         description: 'Managed delivery track for Technology outcomes.',
         status: 'active',
@@ -550,6 +654,7 @@ async function seed() {
       {
         companyId: company.id,
         ownerId: david.id,
+        departmentId: dept['client-services'].id,
         title: `${dept['client-services'].name} delivery`,
         description: 'Managed delivery track for Client Services outcomes.',
         status: 'active',
@@ -558,6 +663,7 @@ async function seed() {
       {
         companyId: company.id,
         ownerId: james.id,
+        departmentId: dept['finance-admin'].id,
         title: `${dept['finance-admin'].name} delivery`,
         description: 'Managed delivery track for Finance & Admin outcomes.',
         status: 'active',
@@ -566,6 +672,7 @@ async function seed() {
       {
         companyId: company.id,
         ownerId: lina.id,
+        departmentId: dept.marketing.id,
         title: `${dept.marketing.name} delivery`,
         description: 'Managed delivery track for Marketing outcomes.',
         status: 'active',
@@ -596,7 +703,7 @@ async function seed() {
       insertedProjects.map((p) => ({
         projectId: p.id,
         title: 'Delivery',
-        status: 'active',
+        status: 'active' as const,
         startDate: isoDate(-2),
         dueDate: isoDate(12),
         progress: 0,
@@ -606,40 +713,23 @@ async function seed() {
 
   const milestoneByProjectId = new Map(milestoneRows.map((m) => [m.projectId, m]))
   const projectTasksRows: { milestoneId: string; taskId: string }[] = []
-  const progressByProjectId = new Map<string, { total: number; completed: number }>()
 
   for (const project of insertedProjects) {
     const milestone = milestoneByProjectId.get(project.id)
     if (!milestone) continue
-
-    const projectOwner = insertedUsers.find((u) => u.id === project.ownerId)
-    const projectDeptId = projectOwner?.departmentId
-    const deptTasks = projectDeptId
-      ? insertedTasks.filter((t) => t.departmentId === projectDeptId)
-      : []
-
-    progressByProjectId.set(project.id, {
-      total: deptTasks.length,
-      completed: deptTasks.filter((t) => t.status === 'completed').length,
-    })
-
-    for (const task of deptTasks) {
+    const chosen = insertedTasks.filter((task) => task.departmentId === project.departmentId).slice(0, 2)
+    for (const task of chosen) {
       projectTasksRows.push({ milestoneId: milestone.id, taskId: task.id })
     }
+    const completed = chosen.filter((task) => task.status === 'completed').length
+    const progress = chosen.length === 0 ? 0 : Math.round((completed / chosen.length) * 100)
+    await db.update(projects).set({ progress }).where(eq(projects.id, project.id))
+    await db.update(projectMilestones).set({ progress }).where(eq(projectMilestones.id, milestone.id))
   }
 
   if (projectTasksRows.length) {
     await db.insert(projectMilestoneTasks).values(projectTasksRows)
   }
-
-  // Store computed progress into projects for quick UI display.
-  await Promise.all(
-    insertedProjects.map(async (p) => {
-      const stats = progressByProjectId.get(p.id) ?? { total: 0, completed: 0 }
-      const progress = stats.total === 0 ? 0 : Math.round((stats.completed / stats.total) * 100)
-      await db.update(projects).set({ progress }).where(eq(projects.id, p.id))
-    }),
-  )
 
   const byTitle = Object.fromEntries(insertedTasks.map((task) => [task.title, task]))
 
@@ -769,6 +859,7 @@ async function seed() {
   ])
 
   console.log(`Seeded ${company.shortName} WorkHub: ${insertedUsers.length} people, ${insertedTasks.length} tasks.`)
+  printLoginRoster()
 }
 
 seed().catch((error) => {

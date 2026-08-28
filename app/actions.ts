@@ -1,17 +1,31 @@
 'use server'
 
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
+import bcrypt from 'bcryptjs'
 import { signOut } from '@/auth'
 import {
   canChangeResponsibilityOwner,
-  canCreateProjects,
-  canEditTaskActor,
-  canManageUsers,
+  canCreateWork,
+  canDeactivateUser,
+  canEditTask,
+  canInvite,
+  canManageOrg,
+  canManageProject,
+  canProgressTask,
+  canSeeTask,
+  canSubmitLeadershipRequest,
+  canSubmitWorkRequest,
+  canViewCompanyReports,
+  canViewDepartmentReports,
+  denied,
+  isDepartmentHead,
+  isDepartmentLeader,
   isManagement,
 } from '@/lib/auth/permissions'
 import { getDb } from '@/lib/db'
-import { getCompany, getCurrentUser } from '@/lib/db/queries'
+import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
+import { tasksToCsv } from '@/lib/reporting/build-report'
 import {
   activityEvents,
   departments,
@@ -33,6 +47,8 @@ import {
   notifications,
   notificationPreferences,
   managementRequests,
+  teams,
+  managementRequestKindEnum,
 } from '@/lib/db/schema'
 import type {
   projectStatusEnum,
@@ -43,15 +59,103 @@ import type {
   managementRequestPriorityEnum,
   managementRequestStatusEnum,
 } from '@/lib/db/schema'
+import { resolveCategoryInput } from '@/lib/category'
 import { statusLabel } from '@/lib/format'
 
 function refreshWorkhub() {
   revalidatePath('/')
-  revalidatePath('/tasks')
-  revalidatePath('/responsibilities')
-  revalidatePath('/departments')
-  revalidatePath('/activity')
-  revalidatePath('/settings')
+}
+
+function slugify(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 48)
+}
+
+async function syncProjectProgress(projectId: string) {
+  const row = await getDb().query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    with: {
+      milestones: {
+        with: { milestoneTasks: { with: { task: true } } },
+      },
+    },
+  })
+  if (!row) return
+
+  for (const milestone of row.milestones) {
+    const total = milestone.milestoneTasks.length
+    const done = milestone.milestoneTasks.filter((entry) => entry.task.status === 'completed').length
+    await getDb()
+      .update(projectMilestones)
+      .set({
+        progress: total === 0 ? 0 : Math.round((done / total) * 100),
+        updatedAt: new Date(),
+      })
+      .where(eq(projectMilestones.id, milestone.id))
+  }
+
+  const all = row.milestones.flatMap((milestone) => milestone.milestoneTasks)
+  const total = all.length
+  const done = all.filter((entry) => entry.task.status === 'completed').length
+  await getDb()
+    .update(projects)
+    .set({
+      progress: total === 0 ? 0 : Math.round((done / total) * 100),
+      updatedAt: new Date(),
+    })
+    .where(eq(projects.id, projectId))
+}
+
+async function syncProjectsForTask(taskId: string) {
+  const links = await getDb().query.projectMilestoneTasks.findMany({
+    where: eq(projectMilestoneTasks.taskId, taskId),
+    with: { milestone: true },
+  })
+  const projectIds = [...new Set(links.map((link) => link.milestone.projectId))]
+  for (const projectId of projectIds) {
+    await syncProjectProgress(projectId)
+  }
+}
+
+async function requireManageableProject(projectId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' as const }
+  const project = await getDb().query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  })
+  if (!project) return { error: 'Project not found.' as const }
+  if (!canManageProject(currentUser, project)) {
+    return { error: 'You are not allowed to change this project.' as const }
+  }
+  return { currentUser, project }
+}
+
+async function placeTaskOnMilestone(taskId: string, milestoneId: string) {
+  const milestone = await getDb().query.projectMilestones.findFirst({
+    where: eq(projectMilestones.id, milestoneId),
+  })
+  if (!milestone) return { error: 'Milestone not found.' as const }
+
+  const siblings = await getDb()
+    .select({ id: projectMilestones.id })
+    .from(projectMilestones)
+    .where(eq(projectMilestones.projectId, milestone.projectId))
+  const siblingIds = siblings.map((row) => row.id)
+
+  if (siblingIds.length > 0) {
+    await getDb()
+      .delete(projectMilestoneTasks)
+      .where(
+        and(eq(projectMilestoneTasks.taskId, taskId), inArray(projectMilestoneTasks.milestoneId, siblingIds)),
+      )
+  }
+
+  await getDb().insert(projectMilestoneTasks).values({ milestoneId, taskId })
+  await syncProjectProgress(milestone.projectId)
+  return { milestone }
 }
 
 export async function switchUser(userId: string) {
@@ -68,19 +172,43 @@ export async function createTask(formData: FormData) {
 
   const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
   if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
-  if (!isManagement(currentUser) && !canCreateProjects(currentUser)) {
-    return { error: 'You are not allowed to create tasks for the workspace.' }
+  if (!canCreateWork(currentUser)) {
+    return denied('You are not allowed to create tasks for the workspace.')
   }
 
   const assigneeId = String(formData.get('assigneeId') ?? currentUser.id)
-  const category = (String(formData.get('category') || 'operational') ||
-    'operational') as (typeof taskCategoryEnum.enumValues)[number]
+  const assignee = assigneeId === currentUser.id ? currentUser : await getUserById(assigneeId)
+  const resolvedCategory = resolveCategoryInput(formData)
+  if ('error' in resolvedCategory) return { error: resolvedCategory.error }
+  const category = resolvedCategory.category
+  const categoryCustom = resolvedCategory.custom
   const priority = (String(formData.get('priority') || 'medium') ||
     'medium') as (typeof taskPriorityEnum.enumValues)[number]
   const startDate = String(formData.get('startDate') ?? '') || null
   const dueDate = String(formData.get('dueDate') ?? '') || null
   const description = String(formData.get('description') ?? '').trim() || null
-  const departmentId = String(formData.get('departmentId') ?? currentUser.departmentId ?? '') || null
+  let departmentId =
+    String(formData.get('departmentId') ?? '') ||
+    assignee?.departmentId ||
+    currentUser.departmentId ||
+    null
+  if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
+    departmentId = currentUser.departmentId
+  }
+  const milestoneId = String(formData.get('milestoneId') ?? '') || null
+
+  let milestoneForTask: { id: string; projectId: string; title: string } | null = null
+  if (milestoneId) {
+    const milestone = await getDb().query.projectMilestones.findFirst({
+      where: eq(projectMilestones.id, milestoneId),
+    })
+    if (!milestone) return { error: 'Milestone not found.' }
+    const project = await getDb().query.projects.findFirst({ where: eq(projects.id, milestone.projectId) })
+    if (!project || !canManageProject(currentUser, project)) {
+      return denied('You are not allowed to link work to this project.')
+    }
+    milestoneForTask = milestone
+  }
 
   const [task] = await getDb()
     .insert(tasks)
@@ -92,6 +220,7 @@ export async function createTask(formData: FormData) {
       createdById: currentUser.id,
       departmentId,
       category,
+      categoryCustom,
       priority,
       status: 'not_started',
       startDate,
@@ -108,6 +237,31 @@ export async function createTask(formData: FormData) {
     summary: `created ${title}`,
   })
 
+  if (assigneeId && assigneeId !== currentUser.id) {
+    await getDb().insert(notifications).values({
+      companyId: company.id,
+      userId: assigneeId,
+      type: 'reminder',
+      title: 'New task assigned',
+      body: `${currentUser.firstName} ${currentUser.lastName} assigned you “${title}”.`,
+      entityType: 'task',
+      entityId: task.id,
+    })
+  }
+
+  if (milestoneForTask) {
+    const placed = await placeTaskOnMilestone(task.id, milestoneForTask.id)
+    if ('error' in placed) return { error: placed.error }
+    await getDb().insert(activityEvents).values({
+      companyId: company.id,
+      actorId: currentUser.id,
+      entityType: 'project',
+      entityId: milestoneForTask.projectId,
+      action: 'task_linked',
+      summary: `linked ${title} to ${milestoneForTask.title}`,
+    })
+  }
+
   refreshWorkhub()
   return { ok: true }
 }
@@ -118,12 +272,17 @@ export async function createResponsibility(formData: FormData) {
 
   const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
   if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
-  if (!isManagement(currentUser) && !canCreateProjects(currentUser)) {
-    return { error: 'You are not allowed to create responsibilities.' }
+  if (!canCreateWork(currentUser)) {
+    return denied('You are not allowed to create responsibilities.')
   }
 
   const ownerId = String(formData.get('ownerId') ?? currentUser.id)
-  const category = String(formData.get('category') || 'operational')
+  const resolvedCategory = resolveCategoryInput(formData)
+  if ('error' in resolvedCategory) return { error: resolvedCategory.error }
+  const category =
+    resolvedCategory.category === 'other'
+      ? resolvedCategory.custom ?? 'other'
+      : resolvedCategory.category
   const status = (String(formData.get('status') || 'active') ||
     'active') as (typeof responsibilityStatusEnum.enumValues)[number]
   const description = String(formData.get('description') ?? '').trim() || null
@@ -198,7 +357,7 @@ export async function createProject(formData: FormData) {
 
   const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
   if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
-  if (!canCreateProjects(currentUser)) return { error: 'You are not allowed to create projects.' }
+  if (!canCreateWork(currentUser)) return denied('You are not allowed to create projects.')
 
   const ownerId = String(formData.get('ownerId') ?? currentUser.id)
   const description = String(formData.get('description') ?? '').trim() || null
@@ -206,7 +365,10 @@ export async function createProject(formData: FormData) {
   const status = (String(formData.get('status') || 'active') ||
     'active') as (typeof projectStatusEnum.enumValues)[number]
 
-  const departmentId = String(formData.get('departmentId') ?? '') || null
+  let departmentId = String(formData.get('departmentId') ?? '') || null
+  if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
+    departmentId = currentUser.departmentId
+  }
   if (!departmentId) return { error: 'Select a department to scope the project.' }
 
   const milestoneTitle = String(formData.get('milestoneTitle') ?? '').trim() || 'Delivery'
@@ -216,6 +378,7 @@ export async function createProject(formData: FormData) {
     .values({
       companyId: company.id,
       ownerId,
+      departmentId,
       title,
       description,
       status,
@@ -248,21 +411,6 @@ export async function createProject(formData: FormData) {
   const milestoneRow = milestone[0]
   if (!milestoneRow) return { error: 'Unable to create project milestone.' }
 
-  const departmentTasks = await getDb().select().from(tasks).where(eq(tasks.departmentId, departmentId))
-  const milestoneTasksRows = departmentTasks.map((t) => ({ milestoneId: milestoneRow.id, taskId: t.id }))
-
-  if (milestoneTasksRows.length) {
-    await getDb().insert(projectMilestoneTasks).values(milestoneTasksRows)
-
-    const completedCount = departmentTasks.filter((t) => t.status === 'completed').length
-    const progress = Math.round((completedCount / departmentTasks.length) * 100)
-
-    await getDb()
-      .update(projects)
-      .set({ progress })
-      .where(eq(projects.id, project.id))
-  }
-
   await getDb().insert(activityEvents).values({
     companyId: company.id,
     actorId: currentUser.id,
@@ -270,6 +418,295 @@ export async function createProject(formData: FormData) {
     entityId: project.id,
     action: 'created',
     summary: `created project ${title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true, id: project.id }
+}
+
+export async function updateProjectDetails(input: {
+  projectId: string
+  title: string
+  description: string
+  status: (typeof projectStatusEnum.enumValues)[number]
+  ownerId: string
+  departmentId: string
+}) {
+  const loaded = await requireManageableProject(input.projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const title = input.title.trim()
+  if (!title) return { error: 'A project name is required.' }
+  if (!input.departmentId) return { error: 'Select a department to scope the project.' }
+  if (!input.ownerId) return { error: 'Select who leads this project.' }
+
+  await getDb()
+    .update(projects)
+    .set({
+      title,
+      description: input.description.trim() || null,
+      status: input.status,
+      ownerId: input.ownerId,
+      departmentId: input.departmentId,
+      updatedAt: new Date(),
+    })
+    .where(eq(projects.id, project.id))
+
+  const existingTeam = await getDb()
+    .select({ userId: projectTeams.userId })
+    .from(projectTeams)
+    .where(eq(projectTeams.projectId, project.id))
+  if (!existingTeam.some((row) => row.userId === input.ownerId)) {
+    await getDb().insert(projectTeams).values({ projectId: project.id, userId: input.ownerId })
+  }
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'edited',
+    summary: `updated project ${title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function addProjectMilestone(formData: FormData) {
+  const projectId = String(formData.get('projectId') ?? '')
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const title = String(formData.get('title') ?? '').trim()
+  if (!title) return { error: 'A milestone name is required.' }
+  const startDate = String(formData.get('startDate') ?? '') || null
+  const dueDate = String(formData.get('dueDate') ?? '') || null
+  if (startDate && dueDate && dueDate < startDate) {
+    return { error: 'Due date cannot be before the start date.' }
+  }
+
+  const [milestone] = await getDb()
+    .insert(projectMilestones)
+    .values({
+      projectId: project.id,
+      title,
+      status: 'planned',
+      startDate,
+      dueDate,
+      progress: 0,
+    })
+    .returning()
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'milestone_added',
+    summary: `added milestone ${milestone.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true, id: milestone.id }
+}
+
+export async function updateProjectMilestone(input: {
+  milestoneId: string
+  title: string
+  status: 'planned' | 'active' | 'completed'
+  startDate: string | null
+  dueDate: string | null
+}) {
+  const milestone = await getDb().query.projectMilestones.findFirst({
+    where: eq(projectMilestones.id, input.milestoneId),
+  })
+  if (!milestone) return { error: 'Milestone not found.' }
+  const loaded = await requireManageableProject(milestone.projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const title = input.title.trim()
+  if (!title) return { error: 'A milestone name is required.' }
+  if (input.startDate && input.dueDate && input.dueDate < input.startDate) {
+    return { error: 'Due date cannot be before the start date.' }
+  }
+
+  await getDb()
+    .update(projectMilestones)
+    .set({
+      title,
+      status: input.status,
+      startDate: input.startDate || null,
+      dueDate: input.dueDate || null,
+      updatedAt: new Date(),
+    })
+    .where(eq(projectMilestones.id, milestone.id))
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'milestone_updated',
+    summary: `updated milestone ${title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function deleteProjectMilestone(milestoneId: string, rehomeMilestoneId?: string | null) {
+  const milestone = await getDb().query.projectMilestones.findFirst({
+    where: eq(projectMilestones.id, milestoneId),
+    with: { milestoneTasks: true },
+  })
+  if (!milestone) return { error: 'Milestone not found.' }
+  const loaded = await requireManageableProject(milestone.projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const siblings = await getDb()
+    .select({ id: projectMilestones.id })
+    .from(projectMilestones)
+    .where(eq(projectMilestones.projectId, project.id))
+  const otherIds = siblings.map((row) => row.id).filter((id) => id !== milestone.id)
+
+  if (rehomeMilestoneId) {
+    if (!otherIds.includes(rehomeMilestoneId)) {
+      return { error: 'Choose another milestone on this project to keep the linked work.' }
+    }
+    for (const entry of milestone.milestoneTasks) {
+      const placed = await placeTaskOnMilestone(entry.taskId, rehomeMilestoneId)
+      if ('error' in placed) return { error: placed.error }
+    }
+  }
+
+  await getDb().delete(projectMilestones).where(eq(projectMilestones.id, milestone.id))
+  await syncProjectProgress(project.id)
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'milestone_removed',
+    summary: rehomeMilestoneId
+      ? `removed milestone ${milestone.title} and kept linked work on this project`
+      : `removed milestone ${milestone.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function addProjectTeamMember(projectId: string, userId: string) {
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+  if (!userId) return { error: 'Select a teammate.' }
+
+  const already = await getDb().query.projectTeams.findFirst({
+    where: and(eq(projectTeams.projectId, project.id), eq(projectTeams.userId, userId)),
+  })
+  if (already) return { ok: true }
+
+  await getDb().insert(projectTeams).values({ projectId: project.id, userId })
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'team_added',
+    summary: `added a teammate to ${project.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function removeProjectTeamMember(projectId: string, userId: string) {
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+  if (userId === project.ownerId) {
+    return { error: 'The project lead stays on the team. Change the lead first.' }
+  }
+
+  await getDb()
+    .delete(projectTeams)
+    .where(and(eq(projectTeams.projectId, project.id), eq(projectTeams.userId, userId)))
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'team_removed',
+    summary: `removed a teammate from ${project.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function linkTaskToMilestone(milestoneId: string, taskId: string) {
+  const milestone = await getDb().query.projectMilestones.findFirst({
+    where: eq(projectMilestones.id, milestoneId),
+  })
+  if (!milestone) return { error: 'Milestone not found.' }
+  const loaded = await requireManageableProject(milestone.projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
+  if (!task) return { error: 'Task not found.' }
+
+  const placed = await placeTaskOnMilestone(taskId, milestoneId)
+  if ('error' in placed) return { error: placed.error }
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'task_linked',
+    summary: `linked ${task.title} to ${milestone.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function unlinkTaskFromMilestone(milestoneId: string, taskId: string) {
+  const milestone = await getDb().query.projectMilestones.findFirst({
+    where: eq(projectMilestones.id, milestoneId),
+  })
+  if (!milestone) return { error: 'Milestone not found.' }
+  const loaded = await requireManageableProject(milestone.projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
+
+  await getDb()
+    .delete(projectMilestoneTasks)
+    .where(
+      and(eq(projectMilestoneTasks.milestoneId, milestoneId), eq(projectMilestoneTasks.taskId, taskId)),
+    )
+
+  await syncProjectProgress(project.id)
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'task_unlinked',
+    summary: `unlinked ${task?.title ?? 'a task'} from ${milestone.title}`,
   })
 
   refreshWorkhub()
@@ -285,6 +722,7 @@ export async function addComment(taskId: string, body: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to comment on this task.')
 
   await getDb().insert(taskComments).values({
     taskId,
@@ -311,6 +749,8 @@ export async function updateTaskDetails(input: {
   description: string
   assigneeId: string
   priority: (typeof taskPriorityEnum.enumValues)[number]
+  category?: (typeof taskCategoryEnum.enumValues)[number]
+  categoryCustom?: string | null
   startDate: string | null
   dueDate: string | null
 }) {
@@ -319,8 +759,12 @@ export async function updateTaskDetails(input: {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canEditTaskActor(currentUser, task)) {
-    return { error: 'You are not allowed to edit this task.' }
+  if (!canEditTask(currentUser, task)) {
+    return denied('You are not allowed to edit this task.')
+  }
+
+  if (input.category === 'other' && !input.categoryCustom?.trim()) {
+    return { error: 'Type a custom category, or pick one from the list.' }
   }
 
   const title = input.title.trim()
@@ -335,6 +779,7 @@ export async function updateTaskDetails(input: {
     task.title !== title ||
     (task.description ?? null) !== nextDescription ||
     task.priority !== input.priority ||
+    (input.category ? task.category !== input.category : false) ||
     (task.startDate ?? null) !== nextStartDate ||
     (task.dueDate ?? null) !== nextDueDate
 
@@ -345,6 +790,12 @@ export async function updateTaskDetails(input: {
       description: nextDescription,
       assigneeId: input.assigneeId,
       priority: input.priority,
+      ...(input.category
+        ? {
+            category: input.category,
+            categoryCustom: input.category === 'other' ? input.categoryCustom || null : null,
+          }
+        : {}),
       startDate: nextStartDate,
       dueDate: nextDueDate,
       updatedAt: new Date(),
@@ -368,11 +819,12 @@ export async function updateTaskDetails(input: {
       actorId: currentUser.id,
       entityType: 'task',
       entityId: input.taskId,
-      action: 'edited',
-      summary: `updated task details for ${title}`,
-    })
+    action: 'edited',
+    summary: `updated task details for ${title}`,
+  })
   }
 
+  await syncProjectsForTask(input.taskId)
   refreshWorkhub()
   return { ok: true }
 }
@@ -385,6 +837,7 @@ export async function addAttachment(taskId: string, label: string, url: string) 
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to attach files to this task.')
 
   await getDb().insert(taskAttachments).values({
     taskId,
@@ -409,8 +862,10 @@ export async function addAttachment(taskId: string, label: string, url: string) 
 export async function updateTaskProgress(taskId: string, progress: number) {
   const clamped = Math.max(0, Math.min(100, Math.round(progress)))
   const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to update this task.')
 
   const updates: Record<string, unknown> = { progress: clamped, updatedAt: new Date() }
   if (clamped === 100 && task.status !== 'completed') updates.status = 'completed'
@@ -435,6 +890,7 @@ export async function updateTaskProgress(taskId: string, progress: number) {
     await recalculateUnblockedTasks(taskId, task.companyId, currentUser?.id ?? null)
   }
 
+  await syncProjectsForTask(taskId)
   refreshWorkhub()
   return { ok: true }
 }
@@ -498,6 +954,9 @@ export async function createTaskDependency(blockingTaskId: string, blockedTaskId
 
   if (!blockingTask || !blockedTask) return { error: 'One or both tasks not found.' }
   if (blockingTask.companyId !== blockedTask.companyId) return { error: 'Tasks must belong to the same workspace.' }
+  if (!canEditTask(currentUser, blockingTask) || !canEditTask(currentUser, blockedTask)) {
+    return denied('You are not allowed to set dependencies on these tasks.')
+  }
 
   await getDb().insert(taskDependencies).values({
     companyId: blockingTask.companyId,
@@ -594,6 +1053,7 @@ export async function approveTask(taskId: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canSeeTask(currentUser, task)) return denied('You are not allowed to approve this request.')
 
   await getDb()
     .update(taskApprovals)
@@ -612,6 +1072,7 @@ export async function approveTask(taskId: string) {
     summary: `approved ${task.title}`,
   })
 
+  await syncProjectsForTask(taskId)
   refreshWorkhub()
   return { ok: true }
 }
@@ -715,6 +1176,7 @@ export async function createDeliverable(taskId: string, title: string, descripti
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to add deliverables to this task.')
 
   const [deliverable] = await getDb().insert(deliverables).values({
     companyId: task.companyId,
@@ -755,6 +1217,10 @@ export async function submitDeliverable(
     .limit(1)
 
   if (!deliverable) return { error: 'Deliverable not found.' }
+  const [taskForSubmit] = await getDb().select().from(tasks).where(eq(tasks.id, deliverable.taskId)).limit(1)
+  if (!taskForSubmit || !canProgressTask(currentUser, taskForSubmit)) {
+    return denied('You are not allowed to submit this deliverable.')
+  }
 
   const [updated] = await getDb()
     .update(deliverables)
@@ -767,6 +1233,7 @@ export async function submitDeliverable(
       updatedAt: new Date(),
     })
     .where(eq(deliverables.id, deliverableId))
+    .returning()
 
   await getDb().insert(activityEvents).values({
     companyId: deliverable.companyId,
@@ -917,10 +1384,18 @@ export async function rejectDeliverable(deliverableId: string, reason: string) {
 export async function toggleUserStatus(userId: string) {
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' }
-  if (!canManageUsers(currentUser)) return { error: 'You are not allowed to change user status.' }
 
-  const [target] = await getDb().select().from(users).where(eq(users.id, userId)).limit(1)
+  const target = await getUserById(userId)
   if (!target) return { error: 'User not found.' }
+
+  const adminRole = await getDb().select().from(roles).where(eq(roles.key, 'admin')).limit(1)
+  const adminIds =
+    adminRole[0]
+      ? await getDb().select({ userId: userRoles.userId }).from(userRoles).where(eq(userRoles.roleId, adminRole[0].id))
+      : []
+  if (!canDeactivateUser(currentUser, target, adminIds.length)) {
+    return denied('You are not allowed to change this person’s status.')
+  }
 
   const newStatus = target.status === 'active' ? 'inactive' : 'active'
   await getDb().update(users).set({ status: newStatus }).where(eq(users.id, userId))
@@ -943,8 +1418,10 @@ export async function toggleUserStatus(userId: string) {
 
 export async function completeTask(taskId: string) {
   const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to complete this task.')
   const shouldRecalculateUnblocked = task.status !== 'completed'
 
   await getDb()
@@ -967,6 +1444,7 @@ export async function completeTask(taskId: string) {
     await recalculateUnblockedTasks(taskId, task.companyId, currentUser?.id ?? null)
   }
 
+  await syncProjectsForTask(taskId)
   refreshWorkhub()
   return { ok: true }
 }
@@ -976,8 +1454,10 @@ export async function updateTaskStatus(
   status: (typeof taskStatusEnum.enumValues)[number],
 ) {
   const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to change this task status.')
   const shouldRecalculateUnblocked = status === 'completed' && task.status !== 'completed'
   const shouldRequestApproval = status === 'pending_approval'
 
@@ -1009,6 +1489,7 @@ export async function updateTaskStatus(
     await recalculateUnblockedTasks(taskId, task.companyId, currentUser?.id ?? null)
   }
 
+  await syncProjectsForTask(taskId)
   refreshWorkhub()
   return { ok: true }
 }
@@ -1041,7 +1522,7 @@ export async function markAllNotificationsRead() {
   await getDb()
     .update(notifications)
     .set({ readAt: new Date() })
-    .where(eq(notifications.userId, currentUser.id))
+    .where(and(eq(notifications.userId, currentUser.id), isNull(notifications.readAt)))
 
   refreshWorkhub()
   return { ok: true }
@@ -1079,8 +1560,22 @@ export async function createManagementRequest(formData: FormData) {
   const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
   if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
 
+  const wantsWork = String(formData.get('kind') ?? '') === 'work'
+  let kind: (typeof managementRequestKindEnum.enumValues)[number] = 'leadership'
+  if (canSubmitWorkRequest(currentUser)) {
+    kind = 'work'
+  } else if (canSubmitLeadershipRequest(currentUser)) {
+    kind = wantsWork ? 'work' : 'leadership'
+  } else {
+    return denied('You are not allowed to submit this request.')
+  }
+
   const description = String(formData.get('description') ?? '').trim() || null
-  const assigneeId = String(formData.get('assigneeId') ?? '') || null
+  let assigneeId = String(formData.get('assigneeId') ?? '') || null
+  if (kind === 'work' && currentUser.departmentId) {
+    const [dept] = await getDb().select().from(departments).where(eq(departments.id, currentUser.departmentId)).limit(1)
+    assigneeId = dept?.ownerId ?? assigneeId
+  }
   const priority = (String(formData.get('priority') || 'medium') ||
     'medium') as (typeof managementRequestPriorityEnum.enumValues)[number]
 
@@ -1092,6 +1587,7 @@ export async function createManagementRequest(formData: FormData) {
       assigneeId,
       title,
       description,
+      kind,
       priority,
       status: 'open',
     })
@@ -1138,10 +1634,16 @@ export async function updateManagementRequestStatus(
 
   if (!request) return { error: 'Management request not found.' }
 
+  const requestor = await getUserById(request.requestorId)
   const canUpdate =
     isManagement(currentUser) ||
     request.assigneeId === currentUser.id ||
-    request.requestorId === currentUser.id
+    request.requestorId === currentUser.id ||
+    Boolean(
+      isDepartmentLeader(currentUser) &&
+        currentUser.departmentId &&
+        requestor?.departmentId === currentUser.departmentId,
+    )
 
   if (!canUpdate) return { error: 'You are not allowed to update this request.' }
 
@@ -1175,8 +1677,8 @@ export async function sendWorkspaceReminder(input: { userId: string; message: st
   const currentUser = await getCurrentUser()
   const company = await getCompany()
   if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
-  if (!isManagement(currentUser) && !canCreateProjects(currentUser)) {
-    return { error: 'You are not allowed to send reminders.' }
+  if (!isManagement(currentUser) && !canCreateWork(currentUser)) {
+    return denied('You are not allowed to send reminders.')
   }
 
   const message = input.message.trim()
@@ -1204,3 +1706,254 @@ export async function sendWorkspaceReminder(input: { userId: string; message: st
   refreshWorkhub()
   return { ok: true }
 }
+
+const STARTER_PASSWORD = 'Workhub123!'
+
+export async function inviteEmployee(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const firstName = String(formData.get('firstName') ?? '').trim()
+  const lastName = String(formData.get('lastName') ?? '').trim()
+  const email = String(formData.get('email') ?? '').trim().toLowerCase()
+  const jobTitle = String(formData.get('jobTitle') ?? '').trim()
+  let departmentId = String(formData.get('departmentId') ?? '') || null
+  const managerId = String(formData.get('managerId') ?? '') || null
+  const roleKey = String(formData.get('roleKey') ?? 'employee').trim() || 'employee'
+  if (isDepartmentHead(currentUser) && !isManagement(currentUser)) {
+    departmentId = currentUser.departmentId ?? null
+  }
+  if (!canInvite(currentUser, { roleKey, departmentId })) {
+    return denied('You are not allowed to add this person.')
+  }
+  if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
+    return { error: 'Assign a department for this role.' }
+  }
+
+  if (!firstName || !lastName) return { error: 'First and last name are required.' }
+  if (!email || !email.includes('@')) return { error: 'A valid work email is required.' }
+  if (!jobTitle) return { error: 'A job title is required.' }
+
+  const existing = await getUserByEmail(email)
+  if (existing) return { error: 'That email is already on WorkHub.' }
+
+  const company = await getCompany()
+  if (!company) return { error: 'Workspace is not ready yet.' }
+
+  const [role] = await getDb().select().from(roles).where(eq(roles.key, roleKey)).limit(1)
+  if (!role) return { error: 'Choose a valid role.' }
+
+  const initials = `${firstName[0] ?? ''}${lastName[0] ?? ''}`.toUpperCase() || 'G'
+  const passwordHash = await bcrypt.hash(STARTER_PASSWORD, 10)
+
+  const [created] = await getDb()
+    .insert(users)
+    .values({
+      companyId: company.id,
+      departmentId,
+      managerId,
+      email,
+      firstName,
+      lastName,
+      jobTitle,
+      passwordHash,
+      initials,
+      status: 'active',
+    })
+    .returning()
+
+  await getDb().insert(userRoles).values({ userId: created.id, roleId: role.id })
+  await getDb().insert(notificationPreferences).values({ userId: created.id })
+
+  await getDb().insert(activityEvents).values({
+    companyId: company.id,
+    actorId: currentUser.id,
+    entityType: 'user',
+    entityId: created.id,
+    action: 'invited',
+    summary: `added ${firstName} ${lastName} to WorkHub`,
+  })
+
+  refreshWorkhub()
+  return { ok: true, starterPassword: STARTER_PASSWORD, email }
+}
+
+export async function exportReportCsv() {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canViewCompanyReports(currentUser) && !canViewDepartmentReports(currentUser)) {
+    return denied('You are not allowed to export this report.')
+  }
+  const scopedTasks = await listTasks({ viewer: currentUser })
+  const csv = tasksToCsv(scopedTasks)
+  const scope = canViewCompanyReports(currentUser) ? 'company' : 'department'
+  return { ok: true as const, csv, filename: `gcs-workhub-${scope}-${new Date().toISOString().slice(0, 10)}.csv` }
+}
+
+export async function promoteWorkRequest(requestId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canCreateWork(currentUser)) return denied('You are not allowed to turn this into a task.')
+
+  const [request] = await getDb().select().from(managementRequests).where(eq(managementRequests.id, requestId)).limit(1)
+  if (!request) return { error: 'Request not found.' }
+  if (request.kind !== 'work') return { error: 'Only work requests can be promoted to tasks.' }
+  if (request.status === 'resolved' || request.status === 'cancelled') {
+    return { error: 'This request is already closed.' }
+  }
+
+  const requestor = await getUserById(request.requestorId)
+  if (
+    !isManagement(currentUser) &&
+    request.assigneeId !== currentUser.id &&
+    !(isDepartmentLeader(currentUser) && currentUser.departmentId && requestor?.departmentId === currentUser.departmentId)
+  ) {
+    return denied('You are not allowed to promote this request.')
+  }
+
+  const formData = new FormData()
+  formData.set('title', request.title)
+  formData.set('description', request.description ?? '')
+  formData.set('assigneeId', request.requestorId)
+  formData.set('priority', request.priority === 'urgent' ? 'high' : request.priority)
+  formData.set('category', 'operational')
+  if (requestor?.departmentId) formData.set('departmentId', requestor.departmentId)
+  const created = await createTask(formData)
+  if (created && 'error' in created && created.error) return created
+
+  await getDb()
+    .update(managementRequests)
+    .set({ status: 'resolved', responseNotes: 'Promoted to a task.', respondedAt: new Date(), updatedAt: new Date() })
+    .where(eq(managementRequests.id, requestId))
+
+  await getDb().insert(notifications).values({
+    companyId: request.companyId,
+    userId: request.requestorId,
+    type: 'management_request',
+    title: 'Work request accepted',
+    body: `"${request.title}" is now a task on your list.`,
+    entityType: 'management_request',
+    entityId: request.id,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function createDepartment(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  const company = await getCompany()
+  if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
+  if (!canManageOrg(currentUser)) return denied('Only an admin can change company structure.')
+
+  const name = String(formData.get('name') ?? '').trim()
+  if (!name) return { error: 'Department name is required.' }
+  const color = String(formData.get('color') ?? 'teal').trim() || 'teal'
+  const ownerId = String(formData.get('ownerId') ?? '') || null
+  let slug = slugify(String(formData.get('slug') ?? name))
+  if (!slug) slug = `dept-${Date.now().toString(36)}`
+
+  const [created] = await getDb()
+    .insert(departments)
+    .values({ companyId: company.id, name, slug, color, ownerId })
+    .returning()
+
+  await getDb().insert(activityEvents).values({
+    companyId: company.id,
+    actorId: currentUser.id,
+    entityType: 'department',
+    entityId: created.id,
+    action: 'created',
+    summary: `created department ${name}`,
+  })
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function updateDepartment(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canManageOrg(currentUser)) return denied('Only an admin can change company structure.')
+
+  const departmentId = String(formData.get('departmentId') ?? '')
+  const name = String(formData.get('name') ?? '').trim()
+  if (!departmentId || !name) return { error: 'Department and name are required.' }
+  const color = String(formData.get('color') ?? 'teal').trim() || 'teal'
+  const ownerId = String(formData.get('ownerId') ?? '') || null
+
+  await getDb()
+    .update(departments)
+    .set({ name, color, ownerId, slug: slugify(name) })
+    .where(eq(departments.id, departmentId))
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function createTeam(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canManageOrg(currentUser)) return denied('Only an admin can change company structure.')
+
+  const name = String(formData.get('name') ?? '').trim()
+  const departmentId = String(formData.get('departmentId') ?? '')
+  if (!name || !departmentId) return { error: 'Team name and department are required.' }
+
+  const [created] = await getDb().insert(teams).values({ name, departmentId }).returning()
+  const company = await getCompany()
+  if (company) {
+    await getDb().insert(activityEvents).values({
+      companyId: company.id,
+      actorId: currentUser.id,
+      entityType: 'team',
+      entityId: created.id,
+      action: 'created',
+      summary: `created team ${name}`,
+    })
+  }
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function updateTeam(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canManageOrg(currentUser)) return denied('Only an admin can change company structure.')
+  const teamId = String(formData.get('teamId') ?? '')
+  const name = String(formData.get('name') ?? '').trim()
+  if (!teamId || !name) return { error: 'Team and name are required.' }
+  await getDb().update(teams).set({ name }).where(eq(teams.id, teamId))
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function updateUserPlacement(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!canManageOrg(currentUser)) return denied('Only an admin can place people.')
+
+  const userId = String(formData.get('userId') ?? '')
+  if (!userId) return { error: 'Choose a person.' }
+  const departmentId = String(formData.get('departmentId') ?? '') || null
+  const teamId = String(formData.get('teamId') ?? '') || null
+  const managerId = String(formData.get('managerId') ?? '') || null
+  const roleKey = String(formData.get('roleKey') ?? '').trim()
+
+  await getDb()
+    .update(users)
+    .set({ departmentId, teamId, managerId })
+    .where(eq(users.id, userId))
+
+  if (roleKey) {
+    const [role] = await getDb().select().from(roles).where(eq(roles.key, roleKey)).limit(1)
+    if (!role) return { error: 'Choose a valid role.' }
+    if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
+      return { error: 'Department heads and managers need a department.' }
+    }
+    await getDb().delete(userRoles).where(eq(userRoles.userId, userId))
+    await getDb().insert(userRoles).values({ userId, roleId: role.id })
+  }
+
+  refreshWorkhub()
+  return { ok: true }
+}
+

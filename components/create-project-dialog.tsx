@@ -1,11 +1,19 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useFormStatus } from 'react-dom'
-import { X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check, X } from 'lucide-react'
 import { createProject } from '@/app/actions'
 import { Button } from '@/components/ui/button'
+import { ledBy } from '@/lib/format'
 import type { Person } from '@/lib/types'
+
+const STEPS = [
+  { id: 1, label: 'Basics' },
+  { id: 2, label: 'Lead' },
+  { id: 3, label: 'Timeline' },
+  { id: 4, label: 'Team' },
+] as const
 
 function SubmitButton() {
   const { pending } = useFormStatus()
@@ -16,6 +24,21 @@ function SubmitButton() {
   )
 }
 
+function localIsoDate(daysFromToday = 0) {
+  const date = new Date()
+  date.setDate(date.getDate() + daysFromToday)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+type DepartmentOption = { id: string; name: string; owner?: { firstName: string; lastName: string } | null }
+
+function personDepartmentId(person: Person) {
+  return person.departmentId ?? ''
+}
+
 export function CreateProjectDialog({
   people,
   currentUserId,
@@ -24,24 +47,89 @@ export function CreateProjectDialog({
 }: {
   people: Person[]
   currentUserId: string
-  departments: { id: string; name: string }[]
-  onClose: () => void
+  departments: DepartmentOption[]
+  onClose: (projectId?: string) => void
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [step, setStep] = useState(1)
+  const [title, setTitle] = useState('')
+  const [description, setDescription] = useState('')
+  const [ownerId, setOwnerId] = useState(currentUserId)
+  const [departmentId, setDepartmentId] = useState('')
+  const [status, setStatus] = useState('active')
+  const [milestoneTitle, setMilestoneTitle] = useState('Delivery')
+  const [startDate, setStartDate] = useState(localIsoDate(0))
+  const [dueDate, setDueDate] = useState(localIsoDate(30))
+  const [teamIds, setTeamIds] = useState<string[]>([currentUserId])
+
+  const owner = people.find((person) => person.id === ownerId)
+  const department = departments.find((entry) => entry.id === departmentId)
+  const departmentPeople = useMemo(
+    () => (departmentId ? people.filter((person) => personDepartmentId(person) === departmentId) : people),
+    [departmentId, people],
+  )
+
+  function applyDepartment(nextId: string) {
+    setDepartmentId(nextId)
+    const named = departments.find((entry) => entry.id === nextId)?.owner
+    const members = people.filter((person) => personDepartmentId(person) === nextId)
+    const lead =
+      members.find((person) => person.firstName === named?.firstName && person.lastName === named?.lastName) ??
+      members[0]
+    if (lead) setOwnerId(lead.id)
+    const nextTeam = new Set(members.map((person) => person.id))
+    nextTeam.add(lead?.id ?? currentUserId)
+    setTeamIds([...nextTeam])
+  }
+
+  function toggleTeam(id: string) {
+    setTeamIds((current) => {
+      if (id === ownerId) return current
+      return current.includes(id) ? current.filter((value) => value !== id) : [...current, id]
+    })
+  }
+
+  function goNext() {
+    setError(null)
+    if (step === 1 && !title.trim()) {
+      setError('A project name is required.')
+      return
+    }
+    if (step === 2 && !departmentId) {
+      setError('Select the department this project belongs to.')
+      return
+    }
+    if (step === 3 && startDate && dueDate && dueDate < startDate) {
+      setError('Due date cannot be before the start date.')
+      return
+    }
+    setStep((current) => Math.min(current + 1, 4))
+  }
 
   async function action(formData: FormData) {
+    formData.set('title', title.trim())
+    formData.set('description', description)
+    formData.set('ownerId', ownerId)
+    formData.set('departmentId', departmentId)
+    formData.set('status', status)
+    formData.set('milestoneTitle', milestoneTitle.trim() || 'Delivery')
+    formData.set('startDate', startDate)
+    formData.set('dueDate', dueDate)
+    formData.delete('teamUserIds')
+    const uniqueTeam = new Set([...teamIds, ownerId])
+    for (const id of uniqueTeam) formData.append('teamUserIds', id)
     const result = await createProject(formData)
-    if (result?.error) {
+    if (result && 'error' in result && result.error) {
       setError(result.error)
       return
     }
-    onClose()
+    onClose(result && 'id' in result ? result.id : undefined)
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={() => onClose()}>
       <div
-        className="create-modal"
+        className="create-modal create-project-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-project-title"
@@ -53,96 +141,169 @@ export function CreateProjectDialog({
               <span className="eyebrow">Projects</span>
               <h2 id="create-project-title">Create a project</h2>
             </div>
-            <button className="close-button" type="button" aria-label="Close dialog" onClick={onClose}>
+            <button className="close-button" type="button" aria-label="Close dialog" onClick={() => onClose()}>
               <X aria-hidden="true" />
             </button>
           </div>
 
-          <label htmlFor="project-title">Project name</label>
-          <input id="project-title" name="title" autoFocus required placeholder="e.g. Q4 client onboarding readiness" />
+          <ol className="wizard-steps" aria-label="Project setup steps">
+            {STEPS.map((entry) => (
+              <li key={entry.id}>
+                <button
+                  type="button"
+                  className={`wizard-step${step === entry.id ? ' is-active' : ''}${step > entry.id ? ' is-done' : ''}`}
+                  onClick={() => {
+                    if (entry.id < step) setStep(entry.id)
+                  }}
+                >
+                  <span>{step > entry.id ? <Check aria-hidden="true" /> : entry.id}</span>
+                  {entry.label}
+                </button>
+              </li>
+            ))}
+          </ol>
 
-          <div className="form-grid">
-            <label>
-              Owner
-              <select name="ownerId" defaultValue={currentUserId}>
-                {people.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.firstName} {p.lastName}
-                  </option>
-                ))}
-              </select>
-            </label>
+          <div className="wizard-body">
+            {step === 1 && (
+              <>
+                <label htmlFor="project-title">Project name</label>
+                <input
+                  id="project-title"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  autoFocus
+                  required
+                  placeholder="e.g. Q4 client onboarding readiness"
+                />
+                <label htmlFor="project-description">What does success look like?</label>
+                <textarea
+                  id="project-description"
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  placeholder="Outcomes, scope, and who this is for..."
+                />
+              </>
+            )}
 
-            <label>
-              Department scope
-              <select name="departmentId" defaultValue="">
-                <option value="" disabled>
-                  Select…
-                </option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Status
-              <select name="status" defaultValue="active">
-                <option value="active">Active</option>
-                <option value="paused">Paused</option>
-                <option value="completed">Completed</option>
-              </select>
-            </label>
-          </div>
-
-          <label htmlFor="project-description">Description</label>
-          <textarea id="project-description" name="description" placeholder="What outcomes define success for this project?" />
-
-          <div className="form-grid">
-            <label>
-              Milestone name
-              <input name="milestoneTitle" placeholder="Delivery" defaultValue="Delivery" />
-            </label>
-            <label>
-              Start date
-              <input type="date" name="startDate" />
-            </label>
-            <label>
-              Due date
-              <input type="date" name="dueDate" />
-            </label>
-          </div>
-
-          <fieldset style={{ border: '0', padding: 0, margin: '8px 0 0' }}>
-            <legend style={{ fontSize: 11, fontWeight: 800, marginBottom: 8 }}>Project team</legend>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {people.map((p) => (
-                <label key={p.id} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 }}>
-                  <input
-                    type="checkbox"
-                    name="teamUserIds"
-                    value={p.id}
-                    defaultChecked={p.id === currentUserId}
-                  />
-                  {p.firstName} {p.lastName}
+            {step === 2 && (
+              <div className="form-grid">
+                <label>
+                  Department
+                  <select value={departmentId} onChange={(event) => applyDepartment(event.target.value)}>
+                    <option value="">Select the home team</option>
+                    {departments.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.name}
+                      </option>
+                    ))}
+                  </select>
                 </label>
-              ))}
-            </div>
-          </fieldset>
+                <label>
+                  Led by
+                  <select
+                    value={ownerId}
+                    onChange={(event) => {
+                      const next = event.target.value
+                      setOwnerId(next)
+                      setTeamIds((current) => (current.includes(next) ? current : [...current, next]))
+                    }}
+                  >
+                    {(departmentPeople.length > 0 ? departmentPeople : people).map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.firstName} {person.lastName}
+                        {person.jobTitle ? ` · ${person.jobTitle}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {department && (
+                  <p className="task-assign-preview" style={{ gridColumn: '1 / -1' }}>
+                    {ledBy(owner ? `${owner.firstName} ${owner.lastName}` : null)} in {department.name}.
+                    Team members from this department are suggested next.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {step === 3 && (
+              <div className="form-grid">
+                <label>
+                  First milestone
+                  <input value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} placeholder="Delivery" />
+                </label>
+                <label>
+                  Status
+                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                    <option value="active">Active</option>
+                    <option value="paused">Paused</option>
+                    <option value="completed">Completed</option>
+                  </select>
+                </label>
+                <label>
+                  Start date
+                  <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                </label>
+                <label>
+                  Due date
+                  <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
+                </label>
+              </div>
+            )}
+
+            {step === 4 && (
+              <>
+                <p className="task-assign-preview" style={{ marginBottom: 12 }}>
+                  {title.trim() || 'Untitled'} · {department?.name ?? 'No department'} · {ledBy(owner ? `${owner.firstName} ${owner.lastName}` : null)}
+                </p>
+                <fieldset className="team-picker">
+                  <legend>Project team</legend>
+                  <div className="team-picker-grid">
+                    {people.map((person) => {
+                      const checked = teamIds.includes(person.id) || person.id === ownerId
+                      return (
+                        <label key={person.id} className={`team-chip${checked ? ' is-on' : ''}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={person.id === ownerId}
+                            onChange={() => toggleTeam(person.id)}
+                          />
+                          <span>
+                            <strong>
+                              {person.firstName} {person.lastName}
+                            </strong>
+                            <small>{person.jobTitle}</small>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </fieldset>
+              </>
+            )}
+          </div>
 
           {error && <p className="form-error">{error}</p>}
-
           <div className="modal-actions">
-            <Button variant="outline" type="button" onClick={onClose}>
-              Cancel
-            </Button>
-            <SubmitButton />
+            {step === 1 ? (
+              <Button variant="outline" type="button" onClick={() => onClose()}>
+                Cancel
+              </Button>
+            ) : (
+              <Button variant="outline" type="button" onClick={() => { setError(null); setStep((current) => current - 1) }}>
+                <ArrowLeft aria-hidden="true" /> Back
+              </Button>
+            )}
+            {step < 4 ? (
+              <Button className="create-button" type="button" onClick={goNext}>
+                Continue <ArrowRight aria-hidden="true" />
+              </Button>
+            ) : (
+              <SubmitButton />
+            )}
           </div>
         </form>
       </div>
     </div>
   )
 }
-

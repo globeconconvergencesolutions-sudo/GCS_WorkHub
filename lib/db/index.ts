@@ -10,7 +10,12 @@ export function isDatabaseConfigured() {
   return Boolean(getDatabaseUrl())
 }
 
-let cached: ReturnType<typeof drizzle> | null = null
+function createDb(url: string) {
+  return drizzle({ client: neon(url), schema })
+}
+
+type AppDb = ReturnType<typeof createDb>
+let cached: AppDb | null = null
 
 export function getDb() {
   if (cached) return cached
@@ -20,6 +25,6 @@ export function getDb() {
     throw new Error('DATABASE_URL is not set. Add it to .env.local or run `npx neon link`.')
   }
 
-  cached = drizzle({ client: neon(url), schema })
+  cached = createDb(url)
   return cached
 }
