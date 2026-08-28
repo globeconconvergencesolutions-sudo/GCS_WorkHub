@@ -1,6 +1,7 @@
 import { Inter } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
+import { getAppUrl } from '@/lib/env'
 import './globals.css'
 
 const inter = Inter({
@@ -9,10 +10,13 @@ const inter = Inter({
   variable: '--font-inter',
 })
 
+const appUrl = getAppUrl()
+
 export const metadata: Metadata = {
   title: 'GCS WorkHub | Operational clarity for every team',
   description: 'GCS WorkHub is the single source of truth for responsibilities, tasks, deadlines, and department progress.',
   generator: 'GCS WorkHub',
+  ...(appUrl ? { metadataBase: new URL(appUrl) } : {}),
 }
 
 export const viewport: Viewport = {

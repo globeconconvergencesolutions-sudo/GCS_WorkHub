@@ -24,6 +24,7 @@ import {
   userRoles,
   users,
 } from '../lib/db/schema'
+import { requireEnv } from '../lib/env'
 
 config({ path: '.env.local' })
 config()
@@ -35,10 +36,10 @@ if (!url) {
 
 const db = drizzle({ client: neon(url) })
 
-const STAFF_PASSWORD = 'Workhub123!'
-const ADMIN_EMAIL = 'tonyouh@gmail.com'
-const ADMIN_PASSWORD = 'Globecon@2026'
-const MD_EMAIL = 'md@globeconcs.com'
+const STAFF_PASSWORD = requireEnv('SEED_STAFF_PASSWORD')
+const ADMIN_EMAIL = requireEnv('SEED_ADMIN_EMAIL')
+const ADMIN_PASSWORD = requireEnv('SEED_ADMIN_PASSWORD')
+const MD_EMAIL = requireEnv('SEED_MD_EMAIL')
 
 function isoDate(daysFromToday: number, from = new Date()) {
   const date = new Date(from)

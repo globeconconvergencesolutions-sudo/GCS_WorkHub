@@ -1,7 +1,9 @@
 import type { NextAuthConfig } from 'next-auth'
+import { getAuthSecret } from '@/lib/env'
 
 const authConfig = {
-  secret: process.env.AUTH_SECRET ?? 'dev-only-auth-secret-change-me',
+  secret: getAuthSecret(),
+  trustHost: true,
   pages: {
     signIn: '/login',
   },

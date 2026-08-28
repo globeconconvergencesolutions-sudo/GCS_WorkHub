@@ -23,6 +23,7 @@ import {
   isDepartmentLeader,
   isManagement,
 } from '@/lib/auth/permissions'
+import { getInviteStarterPassword } from '@/lib/env'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
 import { tasksToCsv } from '@/lib/reporting/build-report'
@@ -1707,7 +1708,7 @@ export async function sendWorkspaceReminder(input: { userId: string; message: st
   return { ok: true }
 }
 
-const STARTER_PASSWORD = 'Workhub123!'
+import { getInviteStarterPassword } from '@/lib/env'
 
 export async function inviteEmployee(formData: FormData) {
   const currentUser = await getCurrentUser()
@@ -1744,7 +1745,8 @@ export async function inviteEmployee(formData: FormData) {
   if (!role) return { error: 'Choose a valid role.' }
 
   const initials = `${firstName[0] ?? ''}${lastName[0] ?? ''}`.toUpperCase() || 'G'
-  const passwordHash = await bcrypt.hash(STARTER_PASSWORD, 10)
+  const starterPassword = getInviteStarterPassword()
+  const passwordHash = await bcrypt.hash(starterPassword, 10)
 
   const [created] = await getDb()
     .insert(users)
@@ -1775,7 +1777,7 @@ export async function inviteEmployee(formData: FormData) {
   })
 
   refreshWorkhub()
-  return { ok: true, starterPassword: STARTER_PASSWORD, email }
+  return { ok: true, starterPassword, email }
 }
 
 export async function exportReportCsv() {
