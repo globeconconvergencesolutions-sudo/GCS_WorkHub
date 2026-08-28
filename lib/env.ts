@@ -14,16 +14,21 @@ export function requireEnv(name: string) {
 }
 
 export function getAuthSecret() {
-  const secret = readEnv('AUTH_SECRET')
+  const secret = readEnv('BETTER_AUTH_SECRET') ?? readEnv('AUTH_SECRET')
   if (secret) return secret
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('AUTH_SECRET is required in production. Set it in the host environment variables.')
+    throw new Error('BETTER_AUTH_SECRET or AUTH_SECRET is required in production.')
   }
   return 'dev-only-auth-secret-change-me'
 }
 
 export function getAppUrl() {
-  return readEnv('AUTH_URL') ?? readEnv('NEXT_PUBLIC_APP_URL') ?? readEnv('URL')
+  return (
+    readEnv('BETTER_AUTH_URL') ??
+    readEnv('AUTH_URL') ??
+    readEnv('NEXT_PUBLIC_APP_URL') ??
+    readEnv('URL')
+  )
 }
 
 export function getMetadataBase() {

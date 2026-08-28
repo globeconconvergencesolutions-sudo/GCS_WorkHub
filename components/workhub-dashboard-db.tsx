@@ -72,7 +72,6 @@ import {
   updateManagementRequestStatus,
   updateNotificationPreferences,
   sendWorkspaceReminder,
-  logout,
   promoteWorkRequest,
   submitDeliverable,
   verifyDeliverable,
@@ -1368,11 +1367,9 @@ export default function WorkhubDashboardDB({
             </form>
             <button
               type="button"
-              onClick={() =>
-                startTransition(async () => {
-                  await logout()
-                })
-              }
+              onClick={() => {
+                window.location.replace(`/api/auth/logout?redirect=${encodeURIComponent('/login?signedOut=1')}&t=${Date.now()}`)
+              }}
             >
               Sign out
             </button>

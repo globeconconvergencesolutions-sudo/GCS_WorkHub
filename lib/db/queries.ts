@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm'
-import { auth } from '@/auth'
 import { ACTIVE_TASK_STATUSES } from '@/lib/constants'
+import { getAuthSession } from '@/lib/auth/session'
 import { getDb } from '@/lib/db'
 import {
   activityEvents,
@@ -57,10 +57,12 @@ export async function getUserByEmail(email: string) {
 
 
 export async function getCurrentUser() {
-  const session = await auth()
-  const email = session?.user?.email
-  if (!email) return null
-  return getUserByEmail(email)
+  const session = await getAuthSession()
+  const userId = session?.user?.id
+  if (!userId) return null
+  const user = await getUserById(userId)
+  if (!user || user.status !== 'active') return null
+  return user
 }
 
 export async function getWorkspaceContext() {

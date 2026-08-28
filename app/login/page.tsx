@@ -1,6 +1,9 @@
 import type { Metadata } from 'next'
+import { redirect } from 'next/navigation'
 import { BarChart3, ClipboardCheck, Users } from 'lucide-react'
 import { LoginForm } from '@/app/login/login-form'
+import { getAuthSession } from '@/lib/auth/session'
+import { getUserById } from '@/lib/db/queries'
 
 export const metadata: Metadata = {
   title: 'Sign In | GCS WorkHub',
@@ -62,10 +65,29 @@ function FeatureShieldIcon() {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ callbackUrl?: string }>
+  searchParams: Promise<{ callbackUrl?: string; signedOut?: string }>
 }) {
   const params = await searchParams
   const callbackUrl = params.callbackUrl ?? '/'
+  if (params.signedOut !== '1') {
+    const session = await getAuthSession()
+    if (session?.user?.id) {
+      const person = await getUserById(session.user.id)
+      if (person && person.status === 'active') {
+        const roleKeys = person.roles?.map((entry) => entry.role.key) ?? []
+        if (callbackUrl.startsWith('/') && !callbackUrl.startsWith('//') && callbackUrl !== '/') {
+          redirect(callbackUrl)
+        }
+        if (roleKeys.includes('admin') || roleKeys.includes('managing_director')) {
+          redirect('/?view=Home')
+        }
+        if (roleKeys.includes('department_head') || roleKeys.includes('manager')) {
+          redirect('/?view=Departments')
+        }
+        redirect('/?view=My%20tasks')
+      }
+    }
+  }
 
   return (
     <main className="auth-shell">

@@ -25,6 +25,8 @@ import {
   users,
 } from '../lib/db/schema'
 import { requireEnv } from '../lib/env'
+import { provisionAuthIdentity } from '../lib/auth/provision-user'
+import { fullName } from '../lib/format'
 
 config({ path: '.env.local' })
 config()
@@ -125,6 +127,17 @@ async function syncPrivilegedAccounts() {
     await setPrimaryRole(md.id, 'managing_director')
   }
 
+  const allPeople = await db.select().from(users)
+  for (const person of allPeople) {
+    if (!person.passwordHash) continue
+    await provisionAuthIdentity({
+      userId: person.id,
+      email: person.email,
+      name: fullName(person),
+      passwordHash: person.passwordHash,
+    })
+  }
+
   return true
 }
 
@@ -145,6 +158,10 @@ async function seed() {
   if (reset) {
     await db.execute(sql`
       truncate table
+        session,
+        account,
+        verification,
+        "user",
         deadline_alert_log,
         notifications,
         notification_preferences,
@@ -860,6 +877,15 @@ async function seed() {
   ])
 
   console.log(`Seeded ${company.shortName} WorkHub: ${insertedUsers.length} people, ${insertedTasks.length} tasks.`)
+  for (const person of insertedUsers) {
+    if (!person.passwordHash) continue
+    await provisionAuthIdentity({
+      userId: person.id,
+      email: person.email,
+      name: fullName(person),
+      passwordHash: person.passwordHash,
+    })
+  }
   printLoginRoster()
 }
 

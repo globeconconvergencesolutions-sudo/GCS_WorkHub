@@ -3,7 +3,6 @@
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import bcrypt from 'bcryptjs'
-import { signOut } from '@/auth'
 import {
   canChangeResponsibilityOwner,
   canCreateWork,
@@ -24,6 +23,7 @@ import {
   isManagement,
 } from '@/lib/auth/permissions'
 import { getInviteStarterPassword } from '@/lib/env'
+import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
 import { tasksToCsv } from '@/lib/reporting/build-report'
@@ -164,7 +164,7 @@ export async function switchUser(userId: string) {
 }
 
 export async function logout() {
-  await signOut({ redirectTo: '/login' })
+  return { redirectTo: `/api/auth/logout?redirect=${encodeURIComponent('/login?signedOut=1')}&t=${Date.now()}` }
 }
 
 export async function createTask(formData: FormData) {
@@ -1400,6 +1400,9 @@ export async function toggleUserStatus(userId: string) {
 
   const newStatus = target.status === 'active' ? 'inactive' : 'active'
   await getDb().update(users).set({ status: newStatus }).where(eq(users.id, userId))
+  if (newStatus === 'inactive') {
+    await revokeAuthSessions(userId)
+  }
 
   const company = await getCompany()
   if (company) {
@@ -1764,6 +1767,12 @@ export async function inviteEmployee(formData: FormData) {
 
   await getDb().insert(userRoles).values({ userId: created.id, roleId: role.id })
   await getDb().insert(notificationPreferences).values({ userId: created.id })
+  await provisionAuthIdentity({
+    userId: created.id,
+    email,
+    name: `${firstName} ${lastName}`,
+    passwordHash,
+  })
 
   await getDb().insert(activityEvents).values({
     companyId: company.id,
