@@ -1,5 +1,4 @@
 import { Inter } from 'next/font/google'
-import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { getMetadataBase } from '@/lib/env'
 import './globals.css'
@@ -31,7 +30,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className={`${inter.variable} ${inter.className}`}>
       <body className="antialiased">
         {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
   )
