@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { eq } from 'drizzle-orm'
 import { auth } from '@/lib/auth/better-auth'
 import { expireAuthCookies } from '@/lib/auth/expire-cookies'
+import { buildSignOutPageHtml } from '@/lib/auth/sign-out-page'
 import { getDb } from '@/lib/db'
 import { authSession } from '@/lib/db/schema'
 
@@ -29,19 +30,7 @@ async function handleLogout(request: NextRequest) {
     // Session row may already be gone. Still clear cookies.
   }
 
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="refresh" content="0;url=${redirectTo.replaceAll('"', '')}" />
-  <title>Signing out…</title>
-</head>
-<body>
-  <p>Signing you out…</p>
-  <script>location.replace(${JSON.stringify(redirectTo)})</script>
-</body>
-</html>`
+  const html = buildSignOutPageHtml(redirectTo)
 
   const response = new NextResponse(html, {
     status: 200,

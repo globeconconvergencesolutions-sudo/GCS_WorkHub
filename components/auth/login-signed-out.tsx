@@ -1,10 +1,15 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { clearSignOutState } from '@/lib/auth/sign-out-client'
 
 export function LoginSignedOutNotice({ signedOut }: { signedOut: boolean }) {
   const [toast, setToast] = useState(false)
   const shown = useRef(false)
+
+  useEffect(() => {
+    clearSignOutState()
+  }, [])
 
   useEffect(() => {
     if (!signedOut || shown.current) return

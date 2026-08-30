@@ -16,6 +16,7 @@ import {
   FileText,
   Home,
   LayoutDashboard,
+  Loader2,
   MessageSquare,
   Paperclip,
   Plus,
@@ -41,6 +42,7 @@ import {
 } from '@/lib/constants'
 import { CategoryField } from '@/components/category-field'
 import { formatDue, formatLongDate, formatRelative, fullName, greeting, categoryLabel, ledBy } from '@/lib/format'
+import { signOutToLogin } from '@/lib/auth/sign-out-client'
 import { resolveWorkspaceView, type WorkspaceView } from '@/lib/workspace-nav'
 import {
   canCreateWork as roleCanCreateWork,
@@ -449,6 +451,7 @@ export default function WorkhubDashboardDB({
   const [selectedTask, setSelectedTask] = useState<DbTask | null>(null)
   const [showNotifications, setShowNotifications] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
@@ -1367,11 +1370,21 @@ export default function WorkhubDashboardDB({
             </form>
             <button
               type="button"
+              disabled={signingOut}
               onClick={() => {
-                window.location.replace(`/api/auth/logout?redirect=${encodeURIComponent('/login?signedOut=1')}&t=${Date.now()}`)
+                if (signingOut) return
+                setSigningOut(true)
+                signOutToLogin()
               }}
             >
-              Sign out
+              {signingOut ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Signing out
+                </>
+              ) : (
+                'Sign out'
+              )}
             </button>
           </div>
         ) : null

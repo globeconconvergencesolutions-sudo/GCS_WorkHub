@@ -1,5 +1,6 @@
 import { Inter } from 'next/font/google'
 import type { Metadata, Viewport } from 'next'
+import { SignOutOverlay } from '@/components/auth/sign-out-overlay'
 import { getMetadataBase } from '@/lib/env'
 import './globals.css'
 
@@ -30,6 +31,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" className={`${inter.variable} ${inter.className}`}>
       <body className="antialiased">
         {children}
+        <SignOutOverlay />
       </body>
     </html>
   )
