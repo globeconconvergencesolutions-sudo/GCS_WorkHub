@@ -26,7 +26,12 @@ function safeInternalPath(value: string) {
   return value
 }
 
-export async function authenticate(formData: FormData) {
+export type LoginActionState = { error?: string }
+
+export async function authenticate(
+  _prevState: LoginActionState,
+  formData: FormData,
+): Promise<LoginActionState> {
   const email = String(formData.get('email') ?? '').trim().toLowerCase()
   const password = String(formData.get('password') ?? '')
   const callbackUrl = String(formData.get('callbackUrl') ?? '/') || '/'

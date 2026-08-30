@@ -1834,7 +1834,7 @@ export default function WorkhubDashboardDB({
               <ViewHeading
                 eyebrow="Work portfolio"
                 title="Projects"
-                description="A focused view of active initiatives and delivery health."
+                description="Client systems, internal platforms, and live bids. Open a card for milestones and the people on the work."
                 action={canCreateWork ? () => setShowCreateProject(true) : undefined}
                 actionLabel="Create project"
               />
@@ -1877,7 +1877,7 @@ export default function WorkhubDashboardDB({
               <section className="metric-grid">
                 <MetricCard label={isManagement ? 'Company completion' : 'Department completion'} value={`${reportMetrics.completionRate}%`} footer="Current workspace rate" icon={<Target aria-hidden="true" />} tone="coral-icon" />
                 <MetricCard label="Overdue tasks" value={String(reportMetrics.overdue)} footer="Needs follow-up" icon={<CircleAlert aria-hidden="true" />} tone="gold-icon" />
-                <MetricCard label="Active initiatives" value={String(reportMetrics.activeProjects)} footer="Department delivery tracks" icon={<BriefcaseBusiness aria-hidden="true" />} tone="blue-icon" />
+                <MetricCard label="Active initiatives" value={String(reportMetrics.activeProjects)} footer="Open projects" icon={<BriefcaseBusiness aria-hidden="true" />} tone="blue-icon" />
                 <MetricCard label="Team coverage" value={`${reportMetrics.teamCoverage}%`} footer="People with department assignment" icon={<UsersRound aria-hidden="true" />} tone="teal-icon" />
               </section>
               <div className="dashboard-grid home-top-grid">
@@ -2875,6 +2875,7 @@ function ActivityPanel({ events, full = false }: { events: DbActivityEvent[]; fu
 
 function ProjectCard({
   title,
+  description,
   owner,
   progress,
   completionRate,
@@ -2897,6 +2898,7 @@ function ProjectCard({
       </div>
       <h2>{title}</h2>
       <p>{ledBy(owner)}</p>
+      {description ? <p className="project-card-summary">{description}</p> : null}
       <div className="project-progress">
         <strong>{completionRate}%</strong>
         <span>completion</span>

@@ -301,6 +301,7 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
   })
 
   const filteredRows = rows.filter((project) => {
+    if (project.status === 'archived') return false
     const viewer = options?.viewer ?? null
     if (!viewer) return true
     if (isManagement(viewer)) return true
@@ -335,10 +336,14 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
         })
 
   return filteredRows.map((project) => {
-    const allMilestoneTasks = project.milestones.flatMap((m) => m.milestoneTasks)
+    const allMilestoneTasks = project.milestones
+      .flatMap((m) => m.milestoneTasks)
+      .filter((mt) => mt.task.status !== 'cancelled')
     const total = allMilestoneTasks.length
     const completed = allMilestoneTasks.filter((mt) => mt.task.status === 'completed').length
-    const progress = total === 0 ? project.progress : Math.round((completed / total) * 100)
+    const progressValues = allMilestoneTasks.map((mt) => mt.task.progress ?? 0)
+    const progress =
+      total === 0 ? project.progress : Math.round(progressValues.reduce((sum, value) => sum + value, 0) / total)
     const overdueCount = allMilestoneTasks.filter((mt) => isOverdue(mt.task.dueDate, mt.task.status)).length
     const blockedCount = allMilestoneTasks.filter(
       (mt) => mt.task.status === 'blocked' || mt.task.status === 'pending_approval',
@@ -346,11 +351,13 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
     const health =
       total === 0
         ? 'No linked work'
-        : progress >= 80 && overdueCount === 0
-          ? 'On track'
-          : progress >= 50
-            ? 'At risk'
-            : 'Needs review'
+        : overdueCount > 0 && progress < 90
+          ? 'At risk'
+          : progress >= 70 && overdueCount === 0
+            ? 'On track'
+            : progress >= 40
+              ? 'At risk'
+              : 'Needs review'
     const risk =
       overdueCount > 0 ? 'High risk' : blockedCount > 0 ? 'Medium risk' : progress < 50 ? 'Watch closely' : 'Low risk'
     const nextMilestone = [...project.milestones]

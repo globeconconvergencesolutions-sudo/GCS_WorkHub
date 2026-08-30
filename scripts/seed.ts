@@ -4,27 +4,19 @@ import { neon } from '@neondatabase/serverless'
 import bcrypt from 'bcryptjs'
 import { drizzle } from 'drizzle-orm/neon-http'
 import {
-  activityEvents,
   companies,
   departments,
   managementRequests,
   notificationPreferences,
   notifications,
-  projectMilestones,
-  projectMilestoneTasks,
-  projectTeams,
-  projects,
-  responsibilities,
-  responsibilityAssignees,
   roles,
-  taskAttachments,
-  taskComments,
   tasks,
   teams,
   userRoles,
   users,
 } from '../lib/db/schema'
 import { requireEnv } from '../lib/env'
+import { applyPriorityWorkload } from '../lib/workload/apply-priorities'
 import { provisionAuthIdentity } from '../lib/auth/provision-user'
 import { fullName } from '../lib/format'
 
@@ -42,13 +34,6 @@ const STAFF_PASSWORD = requireEnv('SEED_STAFF_PASSWORD')
 const ADMIN_EMAIL = requireEnv('SEED_ADMIN_EMAIL')
 const ADMIN_PASSWORD = requireEnv('SEED_ADMIN_PASSWORD')
 const MD_EMAIL = requireEnv('SEED_MD_EMAIL')
-
-function isoDate(daysFromToday: number, from = new Date()) {
-  const date = new Date(from)
-  date.setHours(12, 0, 0, 0)
-  date.setDate(date.getDate() + daysFromToday)
-  return date.toISOString().slice(0, 10)
-}
 
 async function roleIdByKey(key: string) {
   const [role] = await db.select().from(roles).where(eq(roles.key, key)).limit(1)
@@ -277,7 +262,7 @@ async function seed() {
         email: 'patrick@globeconcs.com',
         firstName: 'Patrick',
         lastName: 'Ihiga',
-        jobTitle: 'Business Development Lead',
+        jobTitle: 'Business Development Executive',
         passwordHash: defaultPasswordHash,
         initials: 'PI',
         avatarColor: 'teal',
@@ -289,7 +274,7 @@ async function seed() {
         email: 'victor@globeconcs.com',
         firstName: 'Victor',
         lastName: 'Kibiwott',
-        jobTitle: 'Digital Technology Officer',
+        jobTitle: 'Digital Technology Team Co-Lead',
         passwordHash: defaultPasswordHash,
         initials: 'VK',
         avatarColor: 'teal',
@@ -337,19 +322,19 @@ async function seed() {
         email: 'velma@globeconcs.com',
         firstName: 'Velma',
         lastName: 'Muyuku',
-        jobTitle: 'Digital Technology Officer',
+        jobTitle: 'Digital Technology Team Co-Lead',
         passwordHash: defaultPasswordHash,
         initials: 'VM',
         avatarColor: 'blue',
       },
       {
         companyId: company.id,
-        departmentId: dept.attachees.id,
-        teamId: teamByName['Attachees Desk'],
+        departmentId: dept.technology.id,
+        teamId: teamByName.Platform,
         email: 'krystal.markk@gmail.com',
         firstName: 'Krystal',
         lastName: 'Mark',
-        jobTitle: 'Attachee',
+        jobTitle: 'Supporting Engineer',
         passwordHash: defaultPasswordHash,
         initials: 'KM',
         avatarColor: 'purple',
@@ -394,7 +379,7 @@ async function seed() {
   const intern = insertedUsers.find((user) => user.email === 'interns.intern@globcons.com')!
 
   await db.update(users).set({ managerId: amara.id }).where(ne(users.id, amara.id))
-  await db.update(users).set({ managerId: nia.id }).where(eq(users.id, kwame.id))
+  await db.update(users).set({ managerId: amara.id }).where(eq(users.id, kwame.id))
   await db.update(users).set({ managerId: amara.id }).where(eq(users.id, sofia.id))
   await db.update(users).set({ managerId: amara.id }).where(eq(users.id, tony.id))
 
@@ -413,415 +398,16 @@ async function seed() {
     { userId: james.id, roleId: roleByKey.department_head },
     { userId: lina.id, roleId: roleByKey.department_head },
     { userId: sofia.id, roleId: roleByKey.department_head },
-    { userId: kwame.id, roleId: roleByKey.employee },
+    { userId: kwame.id, roleId: roleByKey.department_head },
     { userId: krystal.id, roleId: roleByKey.employee },
     { userId: john.id, roleId: roleByKey.employee },
     { userId: intern.id, roleId: roleByKey.employee },
   ])
 
-  const insertedResponsibilities = await db
-    .insert(responsibilities)
-    .values([
-      {
-        companyId: company.id,
-        departmentId: dept.operations.id,
-        ownerId: nia.id,
-        title: 'Company operating cadence',
-        description: 'Keep weekly reviews, department check-ins, and executive visibility on track.',
-        category: 'operational',
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.technology.id,
-        ownerId: david.id,
-        title: 'Internal platform reliability',
-        description: 'Own uptime, access, and the GCS knowledge base.',
-        category: 'technical',
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['client-services'].id,
-        ownerId: james.id,
-        title: 'Client onboarding quality',
-        description: 'Standardise onboarding, handoffs, and first-30-day client experience.',
-        category: 'support',
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['finance-admin'].id,
-        ownerId: lina.id,
-        title: 'Payroll accuracy',
-        description: 'Reconcile payroll, approvals, and month-end finance close.',
-        category: 'finance',
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.marketing.id,
-        ownerId: sofia.id,
-        title: 'Campaign performance reporting',
-        description: 'Publish campaign results and pipeline contribution every week.',
-        category: 'marketing',
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.operations.id,
-        ownerId: nia.id,
-        title: 'Meeting and follow-up discipline',
-        description: 'Capture actions from ops reviews and chase owners before they slip.',
-        category: 'administrative',
-      },
-    ])
-    .returning()
+  const workload = await applyPriorityWorkload(db)
 
-  await db.insert(responsibilityAssignees).values([
-    { responsibilityId: insertedResponsibilities[0].id, userId: nia.id },
-    { responsibilityId: insertedResponsibilities[0].id, userId: sofia.id },
-    { responsibilityId: insertedResponsibilities[1].id, userId: david.id },
-    { responsibilityId: insertedResponsibilities[1].id, userId: kwame.id },
-    { responsibilityId: insertedResponsibilities[2].id, userId: james.id },
-    { responsibilityId: insertedResponsibilities[3].id, userId: lina.id },
-    { responsibilityId: insertedResponsibilities[4].id, userId: sofia.id },
-    { responsibilityId: insertedResponsibilities[5].id, userId: nia.id },
-  ])
-
-  const insertedTasks = await db
-    .insert(tasks)
-    .values([
-      {
-        companyId: company.id,
-        departmentId: dept.operations.id,
-        assigneeId: nia.id,
-        createdById: amara.id,
-        title: 'Finalize Q3 operations review',
-        description: 'Close the quarterly review pack for department heads and the MD briefing.',
-        category: 'administrative',
-        priority: 'high',
-        status: 'in_progress',
-        progress: 62,
-        startDate: isoDate(-5),
-        dueDate: isoDate(0),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['client-services'].id,
-        assigneeId: james.id,
-        createdById: amara.id,
-        title: 'Update client onboarding checklist',
-        description: 'Refresh the checklist with the new KYC and kickoff steps.',
-        category: 'support',
-        priority: 'medium',
-        status: 'waiting',
-        progress: 40,
-        startDate: isoDate(-8),
-        dueDate: isoDate(1),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.marketing.id,
-        assigneeId: sofia.id,
-        createdById: amara.id,
-        title: 'Prepare campaign performance report',
-        description: 'Summarise August campaign results and recommended spend shifts.',
-        category: 'marketing',
-        priority: 'medium',
-        status: 'not_started',
-        progress: 0,
-        dueDate: isoDate(4),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['finance-admin'].id,
-        assigneeId: lina.id,
-        createdById: amara.id,
-        title: 'Resolve payroll reconciliation',
-        description: 'Unblock the variance between payroll export and the ledger.',
-        category: 'finance',
-        priority: 'high',
-        status: 'blocked',
-        progress: 35,
-        startDate: isoDate(-6),
-        dueDate: isoDate(5),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.technology.id,
-        assigneeId: david.id,
-        createdById: david.id,
-        title: 'Deploy internal knowledge base',
-        description: 'Ship the first GCS knowledge base to operations and client services.',
-        category: 'technical',
-        priority: 'low',
-        status: 'completed',
-        progress: 100,
-        startDate: isoDate(-14),
-        dueDate: isoDate(0),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.technology.id,
-        assigneeId: kwame.id,
-        createdById: nia.id,
-        title: 'Harden WorkHub access roles',
-        description: 'Map MD, department head, and employee permissions for the first live workspace.',
-        category: 'technical',
-        priority: 'high',
-        status: 'in_progress',
-        progress: 55,
-        startDate: isoDate(-3),
-        dueDate: isoDate(2),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.operations.id,
-        assigneeId: nia.id,
-        createdById: amara.id,
-        title: 'Collect department weekly updates',
-        description: 'Chase missing updates before Thursday ops review.',
-        category: 'operational',
-        priority: 'medium',
-        status: 'in_progress',
-        progress: 48,
-        dueDate: isoDate(2),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['client-services'].id,
-        assigneeId: james.id,
-        createdById: james.id,
-        title: 'Confirm Q4 delivery capacity',
-        description: 'Check team availability against committed client work.',
-        category: 'business_development',
-        priority: 'high',
-        status: 'pending_approval',
-        progress: 80,
-        dueDate: isoDate(3),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept['finance-admin'].id,
-        assigneeId: james.id,
-        createdById: james.id,
-        title: 'Issue August vendor payments',
-        category: 'finance',
-        priority: 'medium',
-        status: 'not_started',
-        progress: 0,
-        dueDate: isoDate(6),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.marketing.id,
-        assigneeId: lina.id,
-        createdById: lina.id,
-        title: 'Refresh GCS service one-pagers',
-        category: 'marketing',
-        priority: 'low',
-        status: 'waiting',
-        progress: 20,
-        dueDate: isoDate(8),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.operations.id,
-        assigneeId: amara.id,
-        createdById: amara.id,
-        title: 'Approve department scorecard draft',
-        category: 'administrative',
-        priority: 'medium',
-        status: 'not_started',
-        progress: 0,
-        dueDate: isoDate(7),
-      },
-      {
-        companyId: company.id,
-        departmentId: dept.technology.id,
-        assigneeId: nia.id,
-        createdById: kwame.id,
-        title: 'Document backup and restore runbook',
-        category: 'technical',
-        priority: 'medium',
-        status: 'completed',
-        progress: 100,
-        dueDate: isoDate(-2),
-      },
-    ])
-    .returning()
-
-  // Phase 2: Projects + milestones
-  const insertedProjects = await db
-    .insert(projects)
-    .values([
-      {
-        companyId: company.id,
-        ownerId: amara.id,
-        departmentId: dept.operations.id,
-        title: `${dept.operations.name} delivery`,
-        description: 'Managed delivery track for Operations outcomes.',
-        status: 'active',
-        progress: 0,
-      },
-      {
-        companyId: company.id,
-        ownerId: nia.id,
-        departmentId: dept.technology.id,
-        title: `${dept.technology.name} delivery`,
-        description: 'Managed delivery track for Technology outcomes.',
-        status: 'active',
-        progress: 0,
-      },
-      {
-        companyId: company.id,
-        ownerId: david.id,
-        departmentId: dept['client-services'].id,
-        title: `${dept['client-services'].name} delivery`,
-        description: 'Managed delivery track for Client Services outcomes.',
-        status: 'active',
-        progress: 0,
-      },
-      {
-        companyId: company.id,
-        ownerId: james.id,
-        departmentId: dept['finance-admin'].id,
-        title: `${dept['finance-admin'].name} delivery`,
-        description: 'Managed delivery track for Finance & Admin outcomes.',
-        status: 'active',
-        progress: 0,
-      },
-      {
-        companyId: company.id,
-        ownerId: lina.id,
-        departmentId: dept.marketing.id,
-        title: `${dept.marketing.name} delivery`,
-        description: 'Managed delivery track for Marketing outcomes.',
-        status: 'active',
-        progress: 0,
-      },
-    ])
-    .returning()
-
-  // Project team membership defaults to all employees in the same department.
-  await Promise.all(
-    insertedProjects.map(async (project) => {
-      const projectOwner = insertedUsers.find((u) => u.id === project.ownerId)!
-      const usersInDept = insertedUsers.filter((u) => u.departmentId === projectOwner.departmentId)
-      if (usersInDept.length === 0) return
-
-      await db.insert(projectTeams).values(
-        usersInDept.map((u) => ({
-          projectId: project.id,
-          userId: u.id,
-        })),
-      )
-    }),
-  )
-
-  const milestoneRows = await db
-    .insert(projectMilestones)
-    .values(
-      insertedProjects.map((p) => ({
-        projectId: p.id,
-        title: 'Delivery',
-        status: 'active' as const,
-        startDate: isoDate(-2),
-        dueDate: isoDate(12),
-        progress: 0,
-      })),
-    )
-    .returning()
-
-  const milestoneByProjectId = new Map(milestoneRows.map((m) => [m.projectId, m]))
-  const projectTasksRows: { milestoneId: string; taskId: string }[] = []
-
-  for (const project of insertedProjects) {
-    const milestone = milestoneByProjectId.get(project.id)
-    if (!milestone) continue
-    const chosen = insertedTasks.filter((task) => task.departmentId === project.departmentId).slice(0, 2)
-    for (const task of chosen) {
-      projectTasksRows.push({ milestoneId: milestone.id, taskId: task.id })
-    }
-    const completed = chosen.filter((task) => task.status === 'completed').length
-    const progress = chosen.length === 0 ? 0 : Math.round((completed / chosen.length) * 100)
-    await db.update(projects).set({ progress }).where(eq(projects.id, project.id))
-    await db.update(projectMilestones).set({ progress }).where(eq(projectMilestones.id, milestone.id))
-  }
-
-  if (projectTasksRows.length) {
-    await db.insert(projectMilestoneTasks).values(projectTasksRows)
-  }
-
-  const byTitle = Object.fromEntries(insertedTasks.map((task) => [task.title, task]))
-
-  await db.insert(taskComments).values([
-    {
-      taskId: byTitle['Update client onboarding checklist'].id,
-      userId: david.id,
-      body: 'Waiting on compliance to confirm the new KYC evidence list before I can close this.',
-    },
-    {
-      taskId: byTitle['Resolve payroll reconciliation'].id,
-      userId: james.id,
-      body: 'Blocked on a missing overtime export from last week. Flagging for ops follow-up.',
-    },
-    {
-      taskId: byTitle['Finalize Q3 operations review'].id,
-      userId: sofia.id,
-      body: 'Technology and Finance packs are in. Marketing is still outstanding.',
-    },
-  ])
-
-  await db.insert(taskAttachments).values([
-    {
-      taskId: byTitle['Finalize Q3 operations review'].id,
-      userId: amara.id,
-      label: 'Q3 operations review outline',
-      url: 'https://docs.google.com',
-    },
-    {
-      taskId: byTitle['Deploy internal knowledge base'].id,
-      userId: nia.id,
-      label: 'Knowledge base launch notes',
-      url: 'https://notion.so',
-    },
-  ])
-
-  await db.insert(activityEvents).values([
-    {
-      companyId: company.id,
-      actorId: nia.id,
-      entityType: 'task',
-      entityId: byTitle['Deploy internal knowledge base'].id,
-      action: 'completed',
-      summary: 'completed Deploy internal knowledge base',
-      createdAt: new Date(Date.now() - 12 * 60_000),
-    },
-    {
-      companyId: company.id,
-      actorId: david.id,
-      entityType: 'task',
-      entityId: byTitle['Update client onboarding checklist'].id,
-      action: 'commented',
-      summary: 'commented on Client onboarding checklist',
-      createdAt: new Date(Date.now() - 48 * 60_000),
-    },
-    {
-      companyId: company.id,
-      actorId: james.id,
-      entityType: 'task',
-      entityId: byTitle['Resolve payroll reconciliation'].id,
-      action: 'flagged',
-      summary: 'flagged Payroll reconciliation as blocked',
-      createdAt: new Date(Date.now() - 2 * 60 * 60_000),
-    },
-    {
-      companyId: company.id,
-      actorId: sofia.id,
-      entityType: 'task',
-      entityId: byTitle['Collect department weekly updates'].id,
-      action: 'updated',
-      summary: 'updated Collect department weekly updates',
-      createdAt: new Date(Date.now() - 3 * 60 * 60_000),
-    },
-  ])
+  const [workhubTask] = await db.select().from(tasks).where(eq(tasks.title, 'WorkHub — central reporting workspace')).limit(1)
+  const [tenderTask] = await db.select().from(tasks).where(eq(tasks.title, 'Tender Watch — online crawler for missing tenders')).limit(1)
 
   await db.insert(notificationPreferences).values(
     insertedUsers.map((user) => ({ userId: user.id })),
@@ -837,21 +423,21 @@ async function seed() {
     },
     {
       companyId: company.id,
-      userId: nia.id,
-      type: 'deadline_3d',
-      title: 'Deadline in 3 days',
-      body: 'Client onboarding checklist is due in three days.',
+      userId: david.id,
+      type: 'deadline_today',
+      title: 'Kalimoni and Tender Watch need a look',
+      body: 'Kalimoni website implementation and Tender Watch crawler are past their first-phase dates.',
       entityType: 'task',
-      entityId: byTitle['Update client onboarding checklist'].id,
+      entityId: tenderTask?.id ?? null,
     },
     {
       companyId: company.id,
-      userId: david.id,
-      type: 'escalation_department',
-      title: 'Department escalation',
-      body: 'Payroll reconciliation is overdue in Finance/Admin.',
+      userId: amara.id,
+      type: 'escalation_management',
+      title: 'WorkHub first visual phase',
+      body: 'GCS WorkHub is live as the central reporting system. First visual phase is in progress.',
       entityType: 'task',
-      entityId: byTitle['Resolve payroll reconciliation'].id,
+      entityId: workhubTask?.id ?? null,
     },
   ])
 
@@ -869,14 +455,14 @@ async function seed() {
       companyId: company.id,
       requestorId: david.id,
       assigneeId: amara.id,
-      title: 'Confirm intern onboarding capacity',
-      description: 'Digital Technology needs guidance on intern placement for August.',
+      title: 'Confirm Hewane website scope',
+      description: 'Digital Technology needs a go-ahead on the Hewane School of Music full website revamp.',
       priority: 'medium',
       status: 'in_progress',
     },
   ])
 
-  console.log(`Seeded ${company.shortName} WorkHub: ${insertedUsers.length} people, ${insertedTasks.length} tasks.`)
+  console.log(`Seeded ${company.shortName} WorkHub: ${insertedUsers.length} people, ${workload.tasksTouched} priority tasks, ${workload.projectsTouched} projects.`)
   for (const person of insertedUsers) {
     if (!person.passwordHash) continue
     await provisionAuthIdentity({

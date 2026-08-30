@@ -189,8 +189,8 @@ export function ProjectWorkspace({
             <p>
               {ledBy(project.owner)}
               {project.department ? ` · ${project.department}` : ''}
-              {project.description ? ` · ${project.description}` : ''}
             </p>
+            {project.description ? <p className="project-workspace-summary">{project.description}</p> : null}
           </div>
           <div className="project-workspace-actions">
             <StatusBadge status={project.health ?? project.status} />

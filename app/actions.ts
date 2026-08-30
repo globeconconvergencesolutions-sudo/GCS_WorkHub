@@ -88,11 +88,16 @@ async function syncProjectProgress(projectId: string) {
 
   for (const milestone of row.milestones) {
     const total = milestone.milestoneTasks.length
-    const done = milestone.milestoneTasks.filter((entry) => entry.task.status === 'completed').length
+    const avg =
+      total === 0
+        ? 0
+        : Math.round(
+            milestone.milestoneTasks.reduce((sum, entry) => sum + (entry.task.progress ?? 0), 0) / total,
+          )
     await getDb()
       .update(projectMilestones)
       .set({
-        progress: total === 0 ? 0 : Math.round((done / total) * 100),
+        progress: avg,
         updatedAt: new Date(),
       })
       .where(eq(projectMilestones.id, milestone.id))
@@ -100,11 +105,12 @@ async function syncProjectProgress(projectId: string) {
 
   const all = row.milestones.flatMap((milestone) => milestone.milestoneTasks)
   const total = all.length
-  const done = all.filter((entry) => entry.task.status === 'completed').length
+  const progress =
+    total === 0 ? 0 : Math.round(all.reduce((sum, entry) => sum + (entry.task.progress ?? 0), 0) / total)
   await getDb()
     .update(projects)
     .set({
-      progress: total === 0 ? 0 : Math.round((done / total) * 100),
+      progress,
       updatedAt: new Date(),
     })
     .where(eq(projects.id, projectId))
