@@ -8,7 +8,7 @@ import {
   BriefcaseBusiness,
   CalendarDays,
   Check,
-  ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -168,6 +168,9 @@ type DeadlineFilter = 'all' | 'overdue' | 'today' | 'week' | 'attention' | 'stuc
 
 const TASK_STATUSES = taskStatusEnum.enumValues
 
+const TASK_PAGE_SIZES = [8, 12, 24] as const
+const DEFAULT_TASK_PAGE_SIZE = 8
+
 function parseDeadlineFilter(value: string | null): DeadlineFilter {
   if (value === 'overdue' || value === 'today' || value === 'week' || value === 'attention' || value === 'stuck') return value
   return 'all'
@@ -176,6 +179,42 @@ function parseDeadlineFilter(value: string | null): DeadlineFilter {
 function parseTaskFilter(value: string | null): 'All' | TaskStatus {
   if (value && (TASK_STATUSES as readonly string[]).includes(value)) return value as TaskStatus
   return 'All'
+}
+
+function parseTaskPage(value: string | null) {
+  const page = Number(value)
+  if (!Number.isInteger(page) || page < 1) return 1
+  return page
+}
+
+function parseTaskPageSize(value: string | null) {
+  const size = Number(value)
+  if ((TASK_PAGE_SIZES as readonly number[]).includes(size)) return size
+  return DEFAULT_TASK_PAGE_SIZE
+}
+
+function visiblePageNumbers(current: number, total: number): Array<number | 'gap'> {
+  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1)
+  const picked = new Set([1, total, current, current - 1, current + 1])
+  if (current <= 3) {
+    picked.add(2)
+    picked.add(3)
+    picked.add(4)
+  }
+  if (current >= total - 2) {
+    picked.add(total - 1)
+    picked.add(total - 2)
+    picked.add(total - 3)
+  }
+  const nums = [...picked].filter((page) => page >= 1 && page <= total).sort((left, right) => left - right)
+  const items: Array<number | 'gap'> = []
+  let last = 0
+  for (const page of nums) {
+    if (last && page > last + 1) items.push('gap')
+    items.push(page)
+    last = page
+  }
+  return items
 }
 
 function taskRowStatusClass(status: TaskStatus) {
@@ -583,6 +622,8 @@ export default function WorkhubDashboardDB({
   const filter = parseTaskFilter(searchParams.get('status'))
   const employeeFilter = searchParams.get('employee') ?? 'all'
   const departmentFilter = searchParams.get('dept') ?? 'all'
+  const taskPageSize = parseTaskPageSize(searchParams.get('per'))
+  const requestedTaskPage = parseTaskPage(searchParams.get('page'))
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null
   const selectedDepartment = initialDepartments.find((department) => department.id === selectedDepartmentId) ?? null
   const canManageSelectedProject = Boolean(
@@ -596,10 +637,12 @@ export default function WorkhubDashboardDB({
 
   function patchQuery(updates: Record<string, string | null | undefined>) {
     const params = new URLSearchParams(searchParams.toString())
+    const resetsPage = ['status', 'deadline', 'dept', 'employee', 'scope', 'per'].some((key) => key in updates) && !('page' in updates)
     for (const [key, value] of Object.entries(updates)) {
-      if (!value || value === 'all' || value === 'All') params.delete(key)
+      if (!value || value === 'all' || value === 'All' || (key === 'page' && value === '1')) params.delete(key)
       else params.set(key, value)
     }
+    if (resetsPage) params.delete('page')
     router.push(`/?${params.toString()}`, { scroll: false })
   }
 
@@ -703,6 +746,12 @@ export default function WorkhubDashboardDB({
           (currentView === 'Departments' ? matchesDepartmentFocus : true)
         )
       })
+
+  const taskPageCount = Math.max(1, Math.ceil(visibleTasks.length / taskPageSize))
+  const taskPage = Math.min(requestedTaskPage, taskPageCount)
+  const pagedTasks = visibleTasks.slice((taskPage - 1) * taskPageSize, taskPage * taskPageSize)
+  const taskRangeStart = visibleTasks.length === 0 ? 0 : (taskPage - 1) * taskPageSize + 1
+  const taskRangeEnd = Math.min(taskPage * taskPageSize, visibleTasks.length)
 
   const visibleProjects = useMemo(
     () =>
@@ -1343,12 +1392,15 @@ export default function WorkhubDashboardDB({
   )
 
   const renderTasks = (title = 'Task workload', subtitle = "Your team's most recent work activity") => (
-    <section className="panel task-panel">
+    <section className="panel task-panel" id="task-workload">
       <div className="panel-heading">
         <div>
           <h2>{title}</h2>
           <p>{subtitle}</p>
         </div>
+        {visibleTasks.length > 0 ? (
+          <p className="task-panel-count">{visibleTasks.length} matching</p>
+        ) : null}
       </div>
       <div className="task-toolbar">
         <div className="filter-pills" role="group" aria-label="Filter tasks">
@@ -1374,7 +1426,7 @@ export default function WorkhubDashboardDB({
         </button>
       </div>
       <div className="task-list">
-        {visibleTasks.map((task) => (
+        {pagedTasks.map((task) => (
           <div
             className={`task-row task-row-clickable ${taskRowStatusClass(task.status)}`}
             key={task.id}
@@ -1425,6 +1477,60 @@ export default function WorkhubDashboardDB({
         ))}
         {visibleTasks.length === 0 && <div className="empty-state">No tasks match your search.</div>}
       </div>
+      {visibleTasks.length > 0 ? (
+        <div className="task-pager">
+          <p className="task-pager-copy">
+            Showing {taskRangeStart}–{taskRangeEnd} of {visibleTasks.length}
+          </p>
+          <div className="task-pager-controls">
+            <label className="task-pager-size">
+              Per page
+              <select
+                value={taskPageSize}
+                aria-label="Tasks per page"
+                onChange={(event) => patchQuery({ per: event.target.value })}
+              >
+                {TASK_PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="task-pager-btn"
+              aria-label="Previous page"
+              disabled={taskPage <= 1}
+              onClick={() => patchQuery({ page: String(taskPage - 1) })}
+            >
+              <ChevronLeft aria-hidden="true" />
+            </button>
+            {visiblePageNumbers(taskPage, taskPageCount).map((item, index) =>
+              item === 'gap' ? (
+                <span key={`gap-${index}`} className="task-pager-gap">…</span>
+              ) : (
+                <button
+                  key={item}
+                  type="button"
+                  className={`task-pager-btn ${item === taskPage ? 'selected' : ''}`}
+                  aria-current={item === taskPage ? 'page' : undefined}
+                  onClick={() => patchQuery({ page: String(item) })}
+                >
+                  {item}
+                </button>
+              ),
+            )}
+            <button
+              type="button"
+              className="task-pager-btn"
+              aria-label="Next page"
+              disabled={taskPage >= taskPageCount}
+              onClick={() => patchQuery({ page: String(taskPage + 1) })}
+            >
+              <ChevronRight aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 
@@ -1756,7 +1862,10 @@ export default function WorkhubDashboardDB({
                   )}
                 </section>
               </div>
-              <DeadlinesPanel upcoming={upcoming} onOpen={() => nav('My tasks', { scope: 'all', deadline: 'week' })} onOpenTask={setSelectedTask} />
+              <div className="dashboard-grid workload-split">
+                {renderTasks()}
+                <DeadlinesPanel compact upcoming={upcoming} onOpen={() => nav('My tasks', { scope: 'all', deadline: 'week' })} onOpenTask={setSelectedTask} />
+              </div>
             </>
           )}
 
@@ -1842,9 +1951,9 @@ export default function WorkhubDashboardDB({
                   </div>
                 </section>
               )}
-              <div className="dashboard-grid">
+              <div className="dashboard-grid workload-split">
                 {renderTasks()}
-                <DeadlinesPanel upcoming={upcoming} onOpen={() => nav('My tasks', { deadline: 'week' })} onOpenTask={setSelectedTask} />
+                <DeadlinesPanel compact upcoming={upcoming} onOpen={() => nav('My tasks', { deadline: 'week' })} onOpenTask={setSelectedTask} />
               </div>
               <div className="lower-grid">
                 <DepartmentPanel departments={initialDepartments} onOpen={canViewDepartments ? (id) => nav('Departments', { department: id }) : undefined} />
@@ -2596,15 +2705,30 @@ function MetricCard({
   )
 }
 
-function DeadlinesPanel({ upcoming, onOpen, onOpenTask }: { upcoming: DbTask[]; onOpen: () => void; onOpenTask?: (task: DbTask) => void }) {
+function DeadlinesPanel({
+  upcoming,
+  onOpen,
+  onOpenTask,
+  compact = false,
+}: {
+  upcoming: DbTask[]
+  onOpen: () => void
+  onOpenTask?: (task: DbTask) => void
+  compact?: boolean
+}) {
+  const shown = compact ? upcoming.slice(0, 6) : upcoming
+  const hiddenCount = Math.max(0, upcoming.length - shown.length)
   return (
-    <section className="panel deadlines-panel">
+    <section className={`panel deadlines-panel ${compact ? 'deadlines-panel-compact' : ''}`}>
       <div className="panel-heading">
-        <div><h2>Upcoming deadlines</h2><p>The next 7 days</p></div>
+        <div>
+          <h2>Upcoming deadlines</h2>
+          <p>{compact ? 'Next 7 days' : 'The next 7 days'}</p>
+        </div>
         <CalendarDays aria-hidden="true" className="heading-icon" />
       </div>
       <div className="deadline-list">
-        {upcoming.map((task, index) => {
+        {shown.map((task, index) => {
           const due = task.dueDate ? new Date(task.dueDate) : null
           const day = due ? due.getDate() : 0
           const month = due ? due.toLocaleDateString('en-GB', { month: 'short' }).toUpperCase() : ''
@@ -2621,11 +2745,15 @@ function DeadlinesPanel({ upcoming, onOpen, onOpenTask }: { upcoming: DbTask[]; 
                 <strong>{task.title}</strong>
                 <span>{formatDue(task.dueDate)} · {task.department?.name ?? 'General'}</span>
               </div>
-              {urgent ? <CircleAlert aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+              {urgent ? <CircleAlert aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
             </button>
           )
         })}
+        {shown.length === 0 ? <p className="empty-state empty-state-compact">No deadlines in the next week.</p> : null}
       </div>
+      {hiddenCount > 0 ? (
+        <p className="deadline-more">{hiddenCount} more this week</p>
+      ) : null}
       <button className="panel-link" onClick={onOpen}>Open calendar <ArrowUpRight aria-hidden="true" /></button>
     </section>
   )
