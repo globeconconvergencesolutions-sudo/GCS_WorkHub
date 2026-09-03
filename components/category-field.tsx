@@ -29,7 +29,9 @@ export function CategoryField({
           onChange={(event) => onChange(event.target.value, event.target.value === 'other' ? customValue : '')}
           disabled={disabled}
         >
-          {Object.entries(TASK_CATEGORY_LABELS).map(([option, label]) => (
+          {Object.entries(TASK_CATEGORY_LABELS)
+            .filter(([option]) => option !== 'project' || value === 'project')
+            .map(([option, label]) => (
             <option key={option} value={option}>
               {label}
             </option>

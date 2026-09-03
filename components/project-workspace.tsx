@@ -3,13 +3,15 @@
 import { useEffect, useMemo, useState, useTransition } from 'react'
 import { Plus, X } from 'lucide-react'
 import {
+  addProjectDepartment,
   addProjectMilestone,
   addProjectTeamMember,
   deleteProject,
   deleteProjectMilestone,
   deleteTask,
-  linkTaskToMilestone,
+  removeProjectDepartment,
   removeProjectTeamMember,
+  setTaskPlacement,
   unlinkTaskFromMilestone,
   updateProjectDetails,
   updateProjectMilestone,
@@ -57,6 +59,9 @@ type Project = {
   blockedCount: number
   tasks: string
   taskIds?: string[]
+  unscheduledTaskIds?: string[]
+  contributingDepartments?: Array<{ id: string; name: string }>
+  participation?: 'home' | 'contributing' | 'member'
   milestones?: Milestone[]
   team?: Array<{ id: string; firstName: string; lastName: string; initials: string; avatarUrl?: string | null; avatarColor?: string | null }>
   activity?: ProjectActivity[]
@@ -68,6 +73,7 @@ type WorkspaceTask = {
   status: string
   dueDate: string | Date | null
   assignee: { firstName: string; lastName: string } | null
+  projectId?: string | null
 }
 
 type DepartmentOption = { id: string; name: string }
@@ -75,6 +81,7 @@ type DepartmentOption = { id: string; name: string }
 type ConfirmState =
   | { kind: 'unlink'; milestoneId: string; taskId: string; taskTitle: string; milestoneTitle: string }
   | { kind: 'remove-member'; userId: string; name: string }
+  | { kind: 'remove-department'; departmentId: string; name: string }
   | {
       kind: 'delete-milestone'
       milestoneId: string
@@ -117,6 +124,7 @@ export function ProjectWorkspace({
   onProjectDeleted,
   onTaskRemoved,
   canDeleteLinkedTask,
+  onTaskLinked,
 }: {
   project: Project
   people: Person[]
@@ -130,6 +138,7 @@ export function ProjectWorkspace({
   onProjectDeleted: () => void
   onTaskRemoved: (taskId: string) => void
   canDeleteLinkedTask: (taskId: string) => boolean
+  onTaskLinked?: (taskId: string, placement: { projectId: string; milestoneId: string | null }) => void
 }) {
   const [isPending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
@@ -145,6 +154,7 @@ export function ProjectWorkspace({
   const [linkMilestoneId, setLinkMilestoneId] = useState(project.milestones?.[0]?.id ?? '')
   const [linkTaskId, setLinkTaskId] = useState('')
   const [addUserId, setAddUserId] = useState('')
+  const [addDepartmentId, setAddDepartmentId] = useState('')
   const [editingMilestoneId, setEditingMilestoneId] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
 
@@ -165,14 +175,22 @@ export function ProjectWorkspace({
 
   const linkedIds = new Set(project.taskIds ?? [])
   const byId = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks])
-  const linkableTasks = tasks.filter((task) => !linkedIds.has(task.id))
+  const linkableTasks = tasks.filter((task) => !task.projectId && !linkedIds.has(task.id))
   const teamIds = new Set((project.team ?? []).map((member) => member.id))
   const addablePeople = people.filter((person) => !teamIds.has(person.id))
+  const contributingIds = new Set((project.contributingDepartments ?? []).map((entry) => entry.id))
+  const addableDepartments = departments.filter(
+    (department) => department.id !== project.departmentId && !contributingIds.has(department.id),
+  )
+  const unscheduledTasks = (project.unscheduledTaskIds ?? [])
+    .map((taskId) => byId.get(taskId))
+    .filter((task): task is NonNullable<typeof task> => Boolean(task))
   const defaultMilestoneId = project.milestones?.[0]?.id ?? ''
   const canAddMilestone =
     Boolean(milestoneTitle.trim()) && datesAreValid(milestoneStart, milestoneDue)
   const canSaveProject = Boolean(title.trim() && ownerId && departmentId)
-  const canLinkTask = Boolean(linkMilestoneId && linkTaskId)
+  const canLinkTask = Boolean(linkTaskId)
+  const canLinkExisting = canManage || canCreateWork
   const linkedTaskCount = project.taskIds?.length ?? 0
 
   function run(action: () => Promise<{ error?: string } | { ok?: boolean } | void>) {
@@ -196,13 +214,21 @@ export function ProjectWorkspace({
             <h1>{project.title}</h1>
             <p>
               {ledBy(project.owner)}
-              {project.department ? ` · ${project.department}` : ''}
+              {project.department ? ` · Home: ${project.department}` : ''}
+              {(project.contributingDepartments ?? []).length > 0
+                ? ` · Contributing: ${project.contributingDepartments?.map((entry) => entry.name).join(', ')}`
+                : ''}
             </p>
+            {project.participation === 'contributing' ? (
+              <p className="project-workspace-summary">Your department is contributing. You can run your slice of the work.</p>
+            ) : null}
             {project.description ? <p className="project-workspace-summary">{project.description}</p> : null}
           </div>
           <div className="project-workspace-actions">
             <StatusBadge status={project.health ?? project.status} />
             <StatusBadge status={project.risk} />
+            {project.participation === 'contributing' ? <StatusBadge status="Contributing" /> : null}
+            {project.participation === 'home' ? <StatusBadge status="Home" /> : null}
             {canManage && (
               <Button variant="outline" type="button" onClick={() => setEditing((current) => !current)}>
                 {editing ? 'Close editor' : 'Edit project'}
@@ -456,6 +482,26 @@ export function ProjectWorkspace({
               )
             })}
             {(project.milestones ?? []).length === 0 && <p className="empty-state">No milestones yet.</p>}
+            {unscheduledTasks.length > 0 && (
+              <div className="milestone-block">
+                <div className="milestone-head">
+                  <div className="responsibility-main">
+                    <strong>Not on a milestone</strong>
+                    <span>Still on this project</span>
+                  </div>
+                </div>
+                <div className="milestone-tasks">
+                  {unscheduledTasks.map((task) => (
+                    <div className="milestone-task-row" key={task.id}>
+                      <button type="button" className="text-back" onClick={() => onOpenTask(task.id)}>
+                        {task.title}
+                      </button>
+                      <span>{TASK_STATUS_LABELS[task.status as keyof typeof TASK_STATUS_LABELS] ?? task.status}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {canManage && (
@@ -500,25 +546,32 @@ export function ProjectWorkspace({
             <p className="form-error">Due date cannot be before the start date.</p>
           )}
 
-          {canManage && (
+          {canLinkExisting && (
             <form
               className="link-existing"
               onSubmit={(event) => {
                 event.preventDefault()
                 if (!canLinkTask) {
-                  setError('Choose a milestone and an existing task.')
+                  setError('Choose an independent task to bring onto this project.')
                   return
                 }
                 run(async () => {
-                  const result = await linkTaskToMilestone(linkMilestoneId, linkTaskId)
-                  if (!result?.error) setLinkTaskId('')
+                  const result = await setTaskPlacement({
+                    taskId: linkTaskId,
+                    projectId: project.id,
+                    milestoneId: linkMilestoneId || null,
+                  })
+                  if (!result || 'error' in result) return result
+                  onTaskLinked?.(linkTaskId, { projectId: project.id, milestoneId: linkMilestoneId || null })
+                  setLinkTaskId('')
                   return result
                 })
               }}
             >
               <label>
-                Link existing work
+                Link independent work
                 <select value={linkMilestoneId} onChange={(event) => setLinkMilestoneId(event.target.value)}>
+                  <option value="">On the project only</option>
                   {(project.milestones ?? []).map((milestone) => (
                     <option key={milestone.id} value={milestone.id}>
                       {milestone.title}
@@ -529,7 +582,7 @@ export function ProjectWorkspace({
               <label>
                 Task
                 <select value={linkTaskId} onChange={(event) => setLinkTaskId(event.target.value)}>
-                  <option value="">Select a task…</option>
+                  <option value="">{linkableTasks.length === 0 ? 'No independent tasks to link' : 'Select a task…'}</option>
                   {linkableTasks.map((task) => (
                     <option key={task.id} value={task.id}>
                       {task.title}
@@ -545,6 +598,68 @@ export function ProjectWorkspace({
         </section>
 
         <div className="project-side-stack">
+          <section className="panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Departments</h2>
+                <p>Home owns the project. Contributing functions run their slice.</p>
+              </div>
+            </div>
+            <div className="employee-list">
+              {project.department ? (
+                <div className="employee-row">
+                  <div className="employee-main">
+                    <strong>{project.department}</strong>
+                    <span>Home</span>
+                  </div>
+                </div>
+              ) : null}
+              {(project.contributingDepartments ?? []).map((entry) => (
+                <div className="employee-row" key={entry.id}>
+                  <div className="employee-main">
+                    <strong>{entry.name}</strong>
+                    <span>Contributing</span>
+                  </div>
+                  {canManage && (
+                    <button
+                      type="button"
+                      className="row-action"
+                      disabled={isPending}
+                      onClick={() => setConfirm({ kind: 'remove-department', departmentId: entry.id, name: entry.name })}
+                    >
+                      <X aria-hidden="true" /> Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {canManage && addableDepartments.length > 0 && (
+              <form
+                className="team-add"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!addDepartmentId) return
+                  run(async () => {
+                    const result = await addProjectDepartment(project.id, addDepartmentId)
+                    if (!result?.error) setAddDepartmentId('')
+                    return result
+                  })
+                }}
+              >
+                <select value={addDepartmentId} onChange={(event) => setAddDepartmentId(event.target.value)}>
+                  <option value="">Bring in a department…</option>
+                  {addableDepartments.map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}
+                    </option>
+                  ))}
+                </select>
+                <Button variant="outline" type="submit" disabled={isPending || !addDepartmentId}>
+                  Add
+                </Button>
+              </form>
+            )}
+          </section>
           <section className="panel">
             <div className="panel-heading">
               <div>
@@ -662,6 +777,16 @@ export function ProjectWorkspace({
           pending={isPending}
           onCancel={() => setConfirm(null)}
           onConfirm={() => run(() => removeProjectTeamMember(project.id, confirm.userId))}
+        />
+      )}
+      {confirm?.kind === 'remove-department' && (
+        <ConfirmDialog
+          title="Remove this department?"
+          description={`${confirm.name} will no longer be a contributing function on this project. Their people keep assigned tasks.`}
+          confirmLabel="Remove department"
+          pending={isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => run(() => removeProjectDepartment(project.id, confirm.departmentId))}
         />
       )}
       {confirm?.kind === 'delete-milestone' && (

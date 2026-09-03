@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type Dispatch, SetStateAction } from 'react'
+import { useEffect, useMemo, useState, type Dispatch, SetStateAction } from 'react'
 import { GitBranch, ListChecks, MessageSquare, Paperclip, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
@@ -8,6 +8,7 @@ import { CategoryField } from '@/components/category-field'
 import { StatusBadge } from '@/components/status-badge'
 import { FileDropzone, AttachmentRow } from '@/components/uploads/file-dropzone'
 import { UserAvatar } from '@/components/user-avatar'
+import type { TaskProjectOption } from '@/components/create-task-dialog'
 import { TASK_PRIORITY_LABELS, TASK_STATUS_LABELS } from '@/lib/constants'
 import { taskCategoryEnum, taskStatusEnum } from '@/lib/db/schema'
 import { categoryLabel, formatDue, formatRelative, fullName, toDateInputValue } from '@/lib/format'
@@ -34,6 +35,10 @@ type DetailTask = {
   startDate?: string | Date | null
   assignee: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   department: { id?: string; name: string; color?: string } | null
+  projectId?: string | null
+  projectTitle?: string | null
+  milestoneId?: string | null
+  milestoneTitle?: string | null
   comments?: Array<{
     id: string
     body: string
@@ -82,6 +87,25 @@ type TaskPatch = {
 }
 
 type DepartmentOption = { id: string; name: string }
+
+const NEW_PROJECT_VALUE = '__new__'
+
+export type TaskPlacementInput = {
+  projectId: string | null
+  milestoneId?: string | null
+  newProjectTitle?: string
+  newProjectDepartmentId?: string
+  newProjectMilestone?: string
+}
+
+export type TaskPlacementResult = {
+  error?: string
+  ok?: true
+  projectId?: string | null
+  projectTitle?: string | null
+  milestoneId?: string | null
+  milestoneTitle?: string | null
+}
 
 function personDepartmentId(person: Person) {
   return person.departmentId ?? ''
@@ -151,6 +175,10 @@ export function TaskDetailSheet({
   onCreateDependency,
   onDeleteDependency,
   onDeleteTask,
+  projects = [],
+  canCreateWork = false,
+  currentUserDepartmentId = '',
+  onSetPlacement,
 }: {
   task: DetailTask
   people: Person[]
@@ -215,17 +243,120 @@ export function TaskDetailSheet({
   onCreateDependency: () => void
   onDeleteDependency: (id: string) => void
   onDeleteTask: () => void
+  projects?: TaskProjectOption[]
+  canCreateWork?: boolean
+  currentUserDepartmentId?: string
+  onSetPlacement?: (input: TaskPlacementInput) => Promise<TaskPlacementResult>
 }) {
   const [confirm, setConfirm] = useState<
     | { kind: 'task' }
     | { kind: 'dependency'; id: string; title: string }
+    | { kind: 'independent' }
     | null
   >(null)
+  const [draftProjectValue, setDraftProjectValue] = useState(task.projectId ?? '')
+  const [draftMilestoneId, setDraftMilestoneId] = useState(task.milestoneId ?? '')
+  const [newProjectTitle, setNewProjectTitle] = useState('')
+  const [newProjectDepartmentId, setNewProjectDepartmentId] = useState(
+    currentUserDepartmentId || task.department?.id || '',
+  )
+  const [newProjectMilestone, setNewProjectMilestone] = useState('Delivery')
+  const [placementSaving, setPlacementSaving] = useState(false)
+  const [placementError, setPlacementError] = useState<string | null>(null)
+  const [placementSaved, setPlacementSaved] = useState(false)
   const attachmentCount = task.attachments?.length ?? 0
   const commentCount = task.comments?.length ?? 0
   const deliverableCount = task.deliverables?.length ?? 0
   const linkCount = (task.blockedByDependencies?.length ?? 0) + (task.blockingDependencies?.length ?? 0)
   const saveDisabled = isPending || !canEdit || !task.assigneeId || !task.title.trim()
+  const creatingProject = draftProjectValue === NEW_PROJECT_VALUE
+  const draftProjectId = creatingProject ? '' : draftProjectValue
+  const selectedPlacementProject = projects.find((project) => project.id === draftProjectId) ?? null
+  const placementMilestones = selectedPlacementProject?.milestones ?? []
+  const currentProjectMissing =
+    Boolean(task.projectId) && !projects.some((project) => project.id === task.projectId)
+
+  useEffect(() => {
+    setDraftProjectValue(task.projectId ?? '')
+    setDraftMilestoneId(task.milestoneId ?? '')
+    setNewProjectTitle('')
+    setNewProjectDepartmentId(currentUserDepartmentId || task.department?.id || '')
+    setNewProjectMilestone('Delivery')
+    setPlacementError(null)
+    setPlacementSaved(false)
+  }, [task.id])
+
+  const placementDirty = useMemo(() => {
+    if (creatingProject) return Boolean(newProjectTitle.trim())
+    const nextProjectId = draftProjectId || null
+    const nextMilestoneId = nextProjectId ? draftMilestoneId || null : null
+    return nextProjectId !== (task.projectId ?? null) || nextMilestoneId !== (task.milestoneId ?? null)
+  }, [
+    creatingProject,
+    newProjectTitle,
+    draftProjectId,
+    draftMilestoneId,
+    task.projectId,
+    task.milestoneId,
+  ])
+
+  function onDraftProjectChange(value: string) {
+    setDraftProjectValue(value)
+    setPlacementSaved(false)
+    setPlacementError(null)
+    if (value === NEW_PROJECT_VALUE || !value) {
+      setDraftMilestoneId('')
+      return
+    }
+    const next = projects.find((project) => project.id === value)
+    const keepCurrent = task.projectId === value ? (task.milestoneId ?? '') : ''
+    setDraftMilestoneId(keepCurrent || next?.milestones?.[0]?.id || '')
+  }
+
+  async function applyPlacement() {
+    if (!onSetPlacement || !canEdit) return
+    if (creatingProject && !newProjectTitle.trim()) {
+      setPlacementError('A project name is required.')
+      return
+    }
+    setPlacementSaving(true)
+    setPlacementError(null)
+    setPlacementSaved(false)
+    try {
+      const result = await onSetPlacement(
+        creatingProject
+          ? {
+              projectId: null,
+              newProjectTitle: newProjectTitle.trim(),
+              newProjectDepartmentId,
+              newProjectMilestone: newProjectMilestone.trim() || 'Delivery',
+            }
+          : {
+              projectId: draftProjectId || null,
+              milestoneId: draftProjectId ? draftMilestoneId || null : null,
+            },
+      )
+      if (result?.error) {
+        setPlacementError(result.error)
+        return
+      }
+      setDraftProjectValue(result.projectId ?? '')
+      setDraftMilestoneId(result.milestoneId ?? '')
+      setNewProjectTitle('')
+      setPlacementSaved(true)
+    } finally {
+      setPlacementSaving(false)
+    }
+  }
+
+  function requestPlacementSave() {
+    if (!placementDirty) return
+    if (!creatingProject && !draftProjectId && task.projectId) {
+      setConfirm({ kind: 'independent' })
+      return
+    }
+    void applyPlacement()
+  }
 
   const tabs: Array<{ id: TaskDetailTab; label: string; count?: number; icon: typeof ListChecks }> = [
     { id: 'overview', label: 'Overview', icon: ListChecks },
@@ -249,6 +380,9 @@ export function TaskDetailSheet({
             <span className="eyebrow">
               Task details
               {task.department?.name ? ` · ${task.department.name}` : ''}
+              {task.projectTitle
+                ? ` · ${task.projectTitle}${task.milestoneTitle ? ` · ${task.milestoneTitle}` : ''}`
+                : ' · Independent'}
             </span>
             <input
               id="task-detail-title"
@@ -429,6 +563,119 @@ export function TaskDetailSheet({
                       onChange={(event) => onPatch({ dueDate: event.target.value || null })}
                     />
                   </label>
+                </div>
+                <div className="form-field td-placement">
+                  <span>Project</span>
+                  {canEdit && onSetPlacement ? (
+                    <>
+                      <select
+                        value={draftProjectValue}
+                        disabled={isPending || placementSaving}
+                        onChange={(event) => onDraftProjectChange(event.target.value)}
+                      >
+                        <option value="">Independent</option>
+                        {currentProjectMissing && task.projectId ? (
+                          <option value={task.projectId}>{task.projectTitle ?? 'Current project'}</option>
+                        ) : null}
+                        {projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.title}
+                            {project.department ? ` · ${project.department}` : ''}
+                          </option>
+                        ))}
+                        {canCreateWork ? <option value={NEW_PROJECT_VALUE}>Create a project for this work…</option> : null}
+                      </select>
+                      {!creatingProject && draftProjectId && (placementMilestones.length > 0 || task.milestoneId) ? (
+                        <label className="form-field" style={{ marginTop: 8, marginBottom: 0 }}>
+                          <span>Milestone</span>
+                          <select
+                            value={draftMilestoneId}
+                            disabled={isPending || placementSaving}
+                            onChange={(event) => {
+                              setDraftMilestoneId(event.target.value)
+                              setPlacementSaved(false)
+                            }}
+                          >
+                            <option value="">Not on a milestone yet</option>
+                            {task.milestoneId &&
+                            !placementMilestones.some((milestone) => milestone.id === task.milestoneId) ? (
+                              <option value={task.milestoneId}>{task.milestoneTitle ?? 'Current milestone'}</option>
+                            ) : null}
+                            {placementMilestones.map((milestone) => (
+                              <option key={milestone.id} value={milestone.id}>
+                                {milestone.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                      {creatingProject ? (
+                        <div className="td-stack" style={{ marginTop: 8 }}>
+                          <label className="form-field">
+                            <span>Project name</span>
+                            <input
+                              value={newProjectTitle}
+                              onChange={(event) => {
+                                setNewProjectTitle(event.target.value)
+                                setPlacementSaved(false)
+                              }}
+                              placeholder="e.g. WorkHub rollout"
+                              disabled={isPending || placementSaving}
+                            />
+                          </label>
+                          <label className="form-field">
+                            <span>Home department</span>
+                            <select
+                              value={newProjectDepartmentId}
+                              onChange={(event) => setNewProjectDepartmentId(event.target.value)}
+                              disabled={isPending || placementSaving}
+                            >
+                              <option value="">Select the accountable function</option>
+                              {departments.map((department) => (
+                                <option key={department.id} value={department.id}>
+                                  {department.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="form-field">
+                            <span>First milestone</span>
+                            <input
+                              value={newProjectMilestone}
+                              onChange={(event) => setNewProjectMilestone(event.target.value)}
+                              placeholder="Delivery"
+                              disabled={isPending || placementSaving}
+                            />
+                          </label>
+                        </div>
+                      ) : null}
+                      {placementError ? <p className="form-error">{placementError}</p> : null}
+                      {placementSaved && !placementError ? <p className="form-ok">Placement saved.</p> : null}
+                      <div className="td-placement-actions">
+                        <button
+                          className="filter-pill selected"
+                          type="button"
+                          disabled={isPending || placementSaving || !placementDirty}
+                          onClick={requestPlacementSave}
+                        >
+                          {placementSaving ? 'Saving…' : task.projectId ? 'Update placement' : 'Link to project'}
+                        </button>
+                      </div>
+                      <p className="td-muted">
+                        {creatingProject
+                          ? 'Starts a project around this task. You can add more work to it after.'
+                          : draftProjectId
+                            ? 'This task stays a task. The project is the container it belongs to.'
+                            : 'Most work can stay independent. Link it only if it belongs to an initiative.'}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="td-muted">
+                      {task.projectTitle
+                        ? `${task.projectTitle}${task.milestoneTitle ? ` · ${task.milestoneTitle}` : ''}`
+                        : 'Independent of a project'}
+                    </p>
+                  )}
                 </div>
                 <p className="td-aside-note">
                   {`${categoryLabel(task.category, task.categoryCustom)} work${canEdit ? '. Change fields here, then save.' : '. You can view this task.'}`}
@@ -845,6 +1092,19 @@ export function TaskDetailSheet({
          onDeleteTask()
        }}
      />
+      ) : null}
+      {confirm?.kind === 'independent' ? (
+        <ConfirmDialog
+          title="Make this task independent?"
+          description={`“${task.title}” will leave ${task.projectTitle ?? 'its project'} and any milestone it is on. The project itself is not deleted.`}
+          confirmLabel="Make independent"
+          pending={placementSaving || isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => {
+            setConfirm(null)
+            void applyPlacement()
+          }}
+        />
       ) : null}
       {confirm?.kind === 'dependency' ? (
         <ConfirmDialog

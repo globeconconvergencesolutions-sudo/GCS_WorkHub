@@ -4,7 +4,8 @@ import { eq } from 'drizzle-orm'
 import { canProgressTask } from '@/lib/auth/permissions'
 import { getDb } from '@/lib/db'
 import { getCurrentUser } from '@/lib/db/queries'
-import { deliverables, tasks } from '@/lib/db/schema'
+import { loadTaskAccess } from '@/lib/db/task-access'
+import { deliverables } from '@/lib/db/schema'
 import { createSignedUpload, isCloudinaryConfigured } from '@/lib/uploads/cloudinary'
 import {
   ALLOWED_UPLOAD_MIME_TYPES,
@@ -78,8 +79,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'You can only change your own profile photo.' }, { status: 403 })
     }
   } else if (kind === 'task_attachment') {
-    const [task] = await getDb().select().from(tasks).where(eq(tasks.id, entityId)).limit(1)
-    if (!task || !canProgressTask(currentUser, task)) {
+    const loaded = await loadTaskAccess(entityId)
+    if (!loaded || !canProgressTask(currentUser, loaded.access)) {
       return NextResponse.json({ error: 'You are not allowed to attach files to this task.' }, { status: 403 })
     }
   } else {
@@ -87,8 +88,8 @@ export async function POST(request: Request) {
     if (!deliverable) {
       return NextResponse.json({ error: 'Deliverable not found.' }, { status: 404 })
     }
-    const [task] = await getDb().select().from(tasks).where(eq(tasks.id, deliverable.taskId)).limit(1)
-    if (!task || !canProgressTask(currentUser, task)) {
+    const loaded = await loadTaskAccess(deliverable.taskId)
+    if (!loaded || !canProgressTask(currentUser, loaded.access)) {
       return NextResponse.json({ error: 'You are not allowed to attach evidence to this deliverable.' }, { status: 403 })
     }
   }

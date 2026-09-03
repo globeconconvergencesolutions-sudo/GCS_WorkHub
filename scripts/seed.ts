@@ -162,6 +162,7 @@ async function seed() {
         responsibilities,
         project_milestone_tasks,
         project_milestones,
+        project_departments,
         project_teams,
         projects,
         user_roles,

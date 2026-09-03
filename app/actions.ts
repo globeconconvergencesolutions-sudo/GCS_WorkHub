@@ -13,6 +13,7 @@ import {
   canManageOrg,
   canManageProject,
   canProgressTask,
+  canSeeProject,
   canSeeTask,
   canSubmitLeadershipRequest,
   canSubmitWorkRequest,
@@ -27,12 +28,20 @@ import { getInviteStarterPassword } from '@/lib/env'
 import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
+import {
+  ensureContributingDepartment,
+  loadProjectAccess,
+  loadTaskAccess,
+  syncProjectHomeDepartment,
+  taskAccessFromRow,
+} from '@/lib/db/task-access'
 import { tasksToCsv } from '@/lib/reporting/build-report'
 import {
   authUser,
   activityEvents,
   departments,
   deliverables,
+  projectDepartments,
   projectMilestones,
   projectMilestoneTasks,
   projectTeams,
@@ -64,7 +73,7 @@ import type {
 } from '@/lib/db/schema'
 import { resolveCategoryInput } from '@/lib/category'
 import { AVATAR_COLORS } from '@/lib/constants'
-import { fullName, makeInitials, statusLabel } from '@/lib/format'
+import { fullName, makeInitials, statusLabel, toDateInputValue } from '@/lib/format'
 import { destroyCloudinaryAsset, isOurCloudinaryUrl, purgeCloudinaryPublicIds } from '@/lib/uploads/cloudinary'
 
 function refreshWorkhub() {
@@ -84,6 +93,7 @@ async function syncProjectProgress(projectId: string) {
   const row = await getDb().query.projects.findFirst({
     where: eq(projects.id, projectId),
     with: {
+      tasks: true,
       milestones: {
         with: { milestoneTasks: { with: { task: true } } },
       },
@@ -108,10 +118,16 @@ async function syncProjectProgress(projectId: string) {
       .where(eq(projectMilestones.id, milestone.id))
   }
 
-  const all = row.milestones.flatMap((milestone) => milestone.milestoneTasks)
+  const byId = new Map(row.tasks.map((task) => [task.id, task]))
+  for (const milestone of row.milestones) {
+    for (const entry of milestone.milestoneTasks) {
+      if (!byId.has(entry.task.id)) byId.set(entry.task.id, entry.task)
+    }
+  }
+  const all = [...byId.values()].filter((task) => task.status !== 'cancelled')
   const total = all.length
   const progress =
-    total === 0 ? 0 : Math.round(all.reduce((sum, entry) => sum + (entry.task.progress ?? 0), 0) / total)
+    total === 0 ? 0 : Math.round(all.reduce((sum, task) => sum + (task.progress ?? 0), 0) / total)
   await getDb()
     .update(projects)
     .set({
@@ -122,11 +138,12 @@ async function syncProjectProgress(projectId: string) {
 }
 
 async function syncProjectsForTask(taskId: string) {
+  const [task] = await getDb().select({ projectId: tasks.projectId }).from(tasks).where(eq(tasks.id, taskId)).limit(1)
   const links = await getDb().query.projectMilestoneTasks.findMany({
     where: eq(projectMilestoneTasks.taskId, taskId),
     with: { milestone: true },
   })
-  const projectIds = [...new Set(links.map((link) => link.milestone.projectId))]
+  const projectIds = [...new Set([task?.projectId, ...links.map((link) => link.milestone.projectId)].filter((id): id is string => Boolean(id)))]
   for (const projectId of projectIds) {
     await syncProjectProgress(projectId)
   }
@@ -135,14 +152,96 @@ async function syncProjectsForTask(taskId: string) {
 async function requireManageableProject(projectId: string) {
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' as const }
-  const project = await getDb().query.projects.findFirst({
-    where: eq(projects.id, projectId),
-  })
-  if (!project) return { error: 'Project not found.' as const }
-  if (!canManageProject(currentUser, project)) {
+  const loaded = await loadProjectAccess(projectId)
+  if (!loaded) return { error: 'Project not found.' as const }
+  if (!canManageProject(currentUser, loaded.access)) {
     return { error: 'You are not allowed to change this project.' as const }
   }
-  return { currentUser, project }
+  return { currentUser, project: loaded.project, access: loaded.access }
+}
+
+async function requireVisibleProject(projectId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' as const }
+  const loaded = await loadProjectAccess(projectId)
+  if (!loaded) return { error: 'Project not found.' as const }
+  if (!canSeeProject(currentUser, loaded.access)) {
+    return { error: 'You are not allowed to use this project.' as const }
+  }
+  return { currentUser, project: loaded.project, access: loaded.access }
+}
+
+async function notifyDepartmentJoined(project: { id: string; companyId: string; title: string }, departmentId: string, actorId: string) {
+  const department = await getDb().query.departments.findFirst({
+    where: eq(departments.id, departmentId),
+  })
+  if (!department?.ownerId || department.ownerId === actorId) return
+  await getDb().insert(notifications).values({
+    companyId: project.companyId,
+    userId: department.ownerId,
+    type: 'reminder',
+    title: 'Brought into a project',
+    body: `${department.name} is now contributing on “${project.title}”.`,
+    entityType: 'project',
+    entityId: project.id,
+  })
+}
+
+async function clearTaskMilestoneLinks(taskId: string) {
+  await getDb().delete(projectMilestoneTasks).where(eq(projectMilestoneTasks.taskId, taskId))
+}
+
+async function createProjectShell(input: {
+  companyId: string
+  ownerId: string
+  actorId: string
+  departmentId: string
+  title: string
+  description?: string | null
+  startDate?: string | Date | null
+  dueDate?: string | Date | null
+  milestoneTitle: string
+}) {
+  const created = await getDb()
+    .insert(projects)
+    .values({
+      companyId: input.companyId,
+      ownerId: input.ownerId,
+      departmentId: input.departmentId,
+      title: input.title,
+      description: input.description ?? null,
+      status: 'active',
+      progress: 0,
+    })
+    .returning()
+  const project = created[0]
+  if (!project) return { error: 'Unable to create the project.' as const }
+
+  await getDb().insert(projectTeams).values({ projectId: project.id, userId: input.ownerId })
+  await syncProjectHomeDepartment(project.id, input.departmentId)
+
+  const [milestone] = await getDb()
+    .insert(projectMilestones)
+    .values({
+      projectId: project.id,
+      title: input.milestoneTitle,
+      status: 'active',
+      startDate: toDateInputValue(input.startDate) || null,
+      dueDate: toDateInputValue(input.dueDate) || null,
+      progress: 0,
+    })
+    .returning()
+
+  await getDb().insert(activityEvents).values({
+    companyId: input.companyId,
+    actorId: input.actorId,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'created',
+    summary: `created project ${input.title}`,
+  })
+
+  return { project, milestone: milestone ?? null }
 }
 
 async function placeTaskOnMilestone(taskId: string, milestoneId: string) {
@@ -151,22 +250,16 @@ async function placeTaskOnMilestone(taskId: string, milestoneId: string) {
   })
   if (!milestone) return { error: 'Milestone not found.' as const }
 
-  const siblings = await getDb()
-    .select({ id: projectMilestones.id })
-    .from(projectMilestones)
-    .where(eq(projectMilestones.projectId, milestone.projectId))
-  const siblingIds = siblings.map((row) => row.id)
+  const [existing] = await getDb().select({ projectId: tasks.projectId }).from(tasks).where(eq(tasks.id, taskId)).limit(1)
+  const previousProjectId = existing?.projectId ?? null
 
-  if (siblingIds.length > 0) {
-    await getDb()
-      .delete(projectMilestoneTasks)
-      .where(
-        and(eq(projectMilestoneTasks.taskId, taskId), inArray(projectMilestoneTasks.milestoneId, siblingIds)),
-      )
-  }
-
+  await clearTaskMilestoneLinks(taskId)
   await getDb().insert(projectMilestoneTasks).values({ milestoneId, taskId })
+  await getDb().update(tasks).set({ projectId: milestone.projectId, updatedAt: new Date() }).where(eq(tasks.id, taskId))
   await syncProjectProgress(milestone.projectId)
+  if (previousProjectId && previousProjectId !== milestone.projectId) {
+    await syncProjectProgress(previousProjectId)
+  }
   return { milestone }
 }
 
@@ -176,6 +269,16 @@ export async function switchUser(userId: string) {
 
 export async function logout() {
   return { redirectTo: `/api/auth/logout?redirect=${encodeURIComponent('/login?signedOut=1')}&t=${Date.now()}` }
+}
+
+async function taskAccessFor(task: {
+  id: string
+  assigneeId?: string | null
+  departmentId?: string | null
+  projectId?: string | null
+}) {
+  const loaded = await loadTaskAccess(task.id)
+  return loaded?.access ?? taskAccessFromRow(task)
 }
 
 export async function createTask(formData: FormData) {
@@ -188,6 +291,7 @@ export async function createTask(formData: FormData) {
     return denied('You are not allowed to create tasks for the workspace.')
   }
 
+  const placement = String(formData.get('placement') ?? 'independent')
   const assigneeId = String(formData.get('assigneeId') ?? currentUser.id)
   const assignee = assigneeId === currentUser.id ? currentUser : await getUserById(assigneeId)
   const resolvedCategory = resolveCategoryInput(formData)
@@ -204,22 +308,67 @@ export async function createTask(formData: FormData) {
     assignee?.departmentId ||
     currentUser.departmentId ||
     null
-  if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
-    departmentId = currentUser.departmentId
-  }
-  const milestoneId = String(formData.get('milestoneId') ?? '') || null
 
+  let projectId = String(formData.get('projectId') ?? '') || null
+  let milestoneId = String(formData.get('milestoneId') ?? '') || null
   let milestoneForTask: { id: string; projectId: string; title: string } | null = null
-  if (milestoneId) {
-    const milestone = await getDb().query.projectMilestones.findFirst({
-      where: eq(projectMilestones.id, milestoneId),
-    })
-    if (!milestone) return { error: 'Milestone not found.' }
-    const project = await getDb().query.projects.findFirst({ where: eq(projects.id, milestone.projectId) })
-    if (!project || !canManageProject(currentUser, project)) {
-      return denied('You are not allowed to link work to this project.')
+  let createdProjectId: string | null = null
+
+  if (placement === 'new') {
+    const projectTitle = String(formData.get('newProjectTitle') ?? '').trim()
+    if (!projectTitle) return { error: 'A project name is required for this task.' }
+    let homeDepartmentId = String(formData.get('newProjectDepartmentId') ?? '') || currentUser.departmentId || null
+    if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
+      homeDepartmentId = currentUser.departmentId
     }
-    milestoneForTask = milestone
+    if (!homeDepartmentId) return { error: 'Select the home department for the new project.' }
+
+    const created = await createProjectShell({
+      companyId: company.id,
+      ownerId: currentUser.id,
+      actorId: currentUser.id,
+      departmentId: homeDepartmentId,
+      title: projectTitle,
+      startDate,
+      dueDate,
+      milestoneTitle: String(formData.get('newProjectMilestone') ?? '').trim() || 'Delivery',
+    })
+    if ('error' in created) return { error: created.error }
+    projectId = created.project.id
+    createdProjectId = created.project.id
+    if (created.milestone) {
+      milestoneId = created.milestone.id
+      milestoneForTask = created.milestone
+    }
+  } else if (placement === 'project' || projectId) {
+    if (!projectId) return { error: 'Select a project for this task, or mark it independent.' }
+    const visible = await requireVisibleProject(projectId)
+    if ('error' in visible) return { error: visible.error }
+    projectId = visible.project.id
+    if (milestoneId) {
+      const milestone = await getDb().query.projectMilestones.findFirst({
+        where: eq(projectMilestones.id, milestoneId),
+      })
+      if (!milestone || milestone.projectId !== projectId) return { error: 'Milestone not found.' }
+      milestoneForTask = milestone
+    }
+  } else {
+    projectId = null
+    milestoneId = null
+  }
+
+  const leaderLocked = isDepartmentLeader(currentUser) && !isManagement(currentUser)
+  if (!projectId && leaderLocked) {
+    departmentId = currentUser.departmentId
+    if (assignee?.departmentId && assignee.departmentId !== currentUser.departmentId) {
+      return denied('Independent tasks stay in your department. Put cross-department work on a project first.')
+    }
+  } else if (projectId) {
+    departmentId = assignee?.departmentId || departmentId
+  }
+
+  if (projectId && assignee?.departmentId && assignee.departmentId !== departmentId) {
+    departmentId = assignee.departmentId
   }
 
   const [task] = await getDb()
@@ -231,6 +380,7 @@ export async function createTask(formData: FormData) {
       assigneeId,
       createdById: currentUser.id,
       departmentId,
+      projectId,
       category,
       categoryCustom,
       priority,
@@ -261,6 +411,14 @@ export async function createTask(formData: FormData) {
     })
   }
 
+  if (projectId && assignee?.departmentId) {
+    const added = await ensureContributingDepartment(projectId, assignee.departmentId)
+    if (added.created) {
+      const [project] = await getDb().select().from(projects).where(eq(projects.id, projectId)).limit(1)
+      if (project) await notifyDepartmentJoined(project, assignee.departmentId, currentUser.id)
+    }
+  }
+
   if (milestoneForTask) {
     const placed = await placeTaskOnMilestone(task.id, milestoneForTask.id)
     if ('error' in placed) return { error: placed.error }
@@ -272,10 +430,12 @@ export async function createTask(formData: FormData) {
       action: 'task_linked',
       summary: `linked ${title} to ${milestoneForTask.title}`,
     })
+  } else if (projectId) {
+    await syncProjectProgress(projectId)
   }
 
   refreshWorkhub()
-  return { ok: true }
+  return { ok: true, projectId: createdProjectId ?? projectId }
 }
 
 export async function createResponsibility(formData: FormData) {
@@ -408,6 +568,22 @@ export async function createProject(formData: FormData) {
     })),
   )
 
+  await syncProjectHomeDepartment(project.id, departmentId)
+  const contributingIds = formData.getAll('contributingDepartmentIds').map((value) => String(value)).filter(Boolean)
+  for (const contributingId of contributingIds) {
+    if (contributingId === departmentId) continue
+    const added = await ensureContributingDepartment(project.id, contributingId)
+    if (added.created) await notifyDepartmentJoined(project, contributingId, currentUser.id)
+  }
+
+  for (const userId of teamSet) {
+    const member = await getUserById(userId)
+    if (member?.departmentId) {
+      const added = await ensureContributingDepartment(project.id, member.departmentId)
+      if (added.created) await notifyDepartmentJoined(project, member.departmentId, currentUser.id)
+    }
+  }
+
   const milestone = await getDb()
     .insert(projectMilestones)
     .values({
@@ -472,6 +648,8 @@ export async function updateProjectDetails(input: {
   if (!existingTeam.some((row) => row.userId === input.ownerId)) {
     await getDb().insert(projectTeams).values({ projectId: project.id, userId: input.ownerId })
   }
+
+  await syncProjectHomeDepartment(project.id, input.departmentId)
 
   await getDb().insert(activityEvents).values({
     companyId: project.companyId,
@@ -626,6 +804,11 @@ export async function addProjectTeamMember(projectId: string, userId: string) {
   if (already) return { ok: true }
 
   await getDb().insert(projectTeams).values({ projectId: project.id, userId })
+  const member = await getUserById(userId)
+  if (member?.departmentId) {
+    const added = await ensureContributingDepartment(project.id, member.departmentId)
+    if (added.created) await notifyDepartmentJoined(project, member.departmentId, currentUser.id)
+  }
 
   await getDb().insert(activityEvents).values({
     companyId: project.companyId,
@@ -634,6 +817,56 @@ export async function addProjectTeamMember(projectId: string, userId: string) {
     entityId: project.id,
     action: 'team_added',
     summary: `added a teammate to ${project.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function addProjectDepartment(projectId: string, departmentId: string) {
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+  if (!departmentId) return { error: 'Select a department.' }
+  if (departmentId === project.departmentId) return { error: 'That department already owns this project.' }
+
+  const added = await ensureContributingDepartment(project.id, departmentId)
+  if (added.created) {
+    await notifyDepartmentJoined(project, departmentId, currentUser.id)
+    const department = await getDb().query.departments.findFirst({ where: eq(departments.id, departmentId) })
+    await getDb().insert(activityEvents).values({
+      companyId: project.companyId,
+      actorId: currentUser.id,
+      entityType: 'project',
+      entityId: project.id,
+      action: 'department_added',
+      summary: `brought ${department?.name ?? 'a department'} in as a contributing function`,
+    })
+  }
+
+  refreshWorkhub()
+  return { ok: true }
+}
+
+export async function removeProjectDepartment(projectId: string, departmentId: string) {
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return { error: loaded.error }
+  const { currentUser, project } = loaded
+  if (departmentId === project.departmentId) {
+    return { error: 'The home department stays on the project.' }
+  }
+
+  await getDb()
+    .delete(projectDepartments)
+    .where(and(eq(projectDepartments.projectId, project.id), eq(projectDepartments.departmentId, departmentId)))
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: project.id,
+    action: 'department_removed',
+    summary: `removed a contributing department from ${project.title}`,
   })
 
   refreshWorkhub()
@@ -670,12 +903,18 @@ export async function linkTaskToMilestone(milestoneId: string, taskId: string) {
     where: eq(projectMilestones.id, milestoneId),
   })
   if (!milestone) return { error: 'Milestone not found.' }
-  const loaded = await requireManageableProject(milestone.projectId)
-  if ('error' in loaded) return { error: loaded.error }
-  const { currentUser, project } = loaded
+  const visible = await requireVisibleProject(milestone.projectId)
+  if ('error' in visible) return { error: visible.error }
+  const { currentUser, project } = visible
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
+  if (!canEditTask(currentUser, await taskAccessFor(task))) {
+    return denied('You are not allowed to move this task.')
+  }
+  if (task.projectId && task.projectId !== milestone.projectId) {
+    return { error: 'This task already belongs to another project. Move it from the task details.' }
+  }
 
   const placed = await placeTaskOnMilestone(taskId, milestoneId)
   if ('error' in placed) return { error: placed.error }
@@ -725,6 +964,139 @@ export async function unlinkTaskFromMilestone(milestoneId: string, taskId: strin
   return { ok: true }
 }
 
+export async function setTaskPlacement(input: {
+  taskId: string
+  projectId: string | null
+  milestoneId?: string | null
+  newProjectTitle?: string | null
+  newProjectDepartmentId?: string | null
+  newProjectMilestone?: string | null
+}) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const loaded = await loadTaskAccess(input.taskId)
+  if (!loaded) return { error: 'Task not found.' }
+  const { task, access } = loaded
+  if (!canEditTask(currentUser, access)) {
+    return denied('You are not allowed to change where this task lives.')
+  }
+
+  const company = await getCompany()
+  if (!company) return { error: 'Workspace is not ready yet.' }
+
+  const previousProjectId = task.projectId
+  let nextProjectId = input.projectId?.trim() || null
+  let nextMilestoneId = input.milestoneId?.trim() || null
+  let nextProjectTitle: string | null = task.project?.title ?? null
+  let nextMilestoneTitle: string | null = null
+  const creatingProject = Boolean(input.newProjectTitle?.trim()) && !nextProjectId
+
+  if (creatingProject) {
+    if (!canCreateWork(currentUser)) return denied('You are not allowed to create projects.')
+    let homeDepartmentId = input.newProjectDepartmentId?.trim() || currentUser.departmentId || null
+    if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
+      homeDepartmentId = currentUser.departmentId
+    }
+    if (!homeDepartmentId) return { error: 'Select the home department for the new project.' }
+
+    const created = await createProjectShell({
+      companyId: company.id,
+      ownerId: currentUser.id,
+      actorId: currentUser.id,
+      departmentId: homeDepartmentId,
+      title: input.newProjectTitle!.trim(),
+      startDate: task.startDate,
+      dueDate: task.dueDate,
+      milestoneTitle: input.newProjectMilestone?.trim() || 'Delivery',
+    })
+    if ('error' in created) return { error: created.error }
+    nextProjectId = created.project.id
+    nextProjectTitle = created.project.title
+    if (created.milestone) {
+      nextMilestoneId = created.milestone.id
+      nextMilestoneTitle = created.milestone.title
+    }
+  }
+
+  if (!nextProjectId) {
+    const assignee = task.assigneeId ? await getUserById(task.assigneeId) : null
+    if (isDepartmentLeader(currentUser) && !isManagement(currentUser)) {
+      if (assignee?.departmentId && assignee.departmentId !== currentUser.departmentId) {
+        return denied('Independent tasks stay in your department. Keep cross-department work on a project.')
+      }
+      if (task.departmentId && currentUser.departmentId && task.departmentId !== currentUser.departmentId) {
+        return denied('Independent tasks stay in your department. Keep cross-department work on a project.')
+      }
+    }
+
+    await clearTaskMilestoneLinks(task.id)
+    await getDb().update(tasks).set({ projectId: null, updatedAt: new Date() }).where(eq(tasks.id, task.id))
+    if (previousProjectId) await syncProjectProgress(previousProjectId)
+
+    await getDb().insert(activityEvents).values({
+      companyId: task.companyId,
+      actorId: currentUser.id,
+      entityType: 'task',
+      entityId: task.id,
+      action: 'edited',
+      summary: `made ${task.title} independent of a project`,
+    })
+
+    refreshWorkhub()
+    return { ok: true as const, projectId: null, projectTitle: null, milestoneId: null, milestoneTitle: null }
+  }
+
+  const visible = await requireVisibleProject(nextProjectId)
+  if ('error' in visible) return { error: visible.error }
+  nextProjectId = visible.project.id
+  nextProjectTitle = visible.project.title
+
+  if (nextMilestoneId) {
+    const milestone = await getDb().query.projectMilestones.findFirst({
+      where: eq(projectMilestones.id, nextMilestoneId),
+    })
+    if (!milestone || milestone.projectId !== nextProjectId) return { error: 'Milestone not found.' }
+    const placed = await placeTaskOnMilestone(task.id, milestone.id)
+    if ('error' in placed) return { error: placed.error }
+    nextMilestoneTitle = milestone.title
+  } else {
+    await clearTaskMilestoneLinks(task.id)
+    await getDb().update(tasks).set({ projectId: nextProjectId, updatedAt: new Date() }).where(eq(tasks.id, task.id))
+    await syncProjectProgress(nextProjectId)
+    if (previousProjectId && previousProjectId !== nextProjectId) {
+      await syncProjectProgress(previousProjectId)
+    }
+  }
+
+  const assignee = task.assigneeId ? await getUserById(task.assigneeId) : null
+  if (assignee?.departmentId) {
+    const added = await ensureContributingDepartment(nextProjectId, assignee.departmentId)
+    if (added.created) await notifyDepartmentJoined(visible.project, assignee.departmentId, currentUser.id)
+  }
+
+  const moved = Boolean(previousProjectId && previousProjectId !== nextProjectId)
+  await getDb().insert(activityEvents).values({
+    companyId: task.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: nextProjectId,
+    action: moved ? 'task_moved' : 'task_linked',
+    summary: nextMilestoneTitle
+      ? `${moved ? 'moved' : 'linked'} ${task.title} to ${nextProjectTitle} · ${nextMilestoneTitle}`
+      : `${moved ? 'moved' : 'linked'} ${task.title} to ${nextProjectTitle}`,
+  })
+
+  refreshWorkhub()
+  return {
+    ok: true as const,
+    projectId: nextProjectId,
+    projectTitle: nextProjectTitle,
+    milestoneId: nextMilestoneId,
+    milestoneTitle: nextMilestoneTitle,
+  }
+}
+
 export async function addComment(taskId: string, body: string) {
   const trimmed = body.trim()
   if (!trimmed) return { error: 'Comment cannot be empty.' }
@@ -734,7 +1106,7 @@ export async function addComment(taskId: string, body: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to comment on this task.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to comment on this task.')
 
   const [comment] = await getDb()
     .insert(taskComments)
@@ -779,7 +1151,7 @@ export async function deleteComment(commentId: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, comment.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (comment.userId !== currentUser.id && !canEditTask(currentUser, task)) {
+  if (comment.userId !== currentUser.id && !canEditTask(currentUser, await taskAccessFor(task))) {
     return denied('You can only remove your own comments.')
   }
 
@@ -804,7 +1176,7 @@ export async function updateTaskDetails(input: {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canEditTask(currentUser, task)) {
+  if (!canEditTask(currentUser, await taskAccessFor(task))) {
     return denied('You are not allowed to edit this task.')
   }
 
@@ -820,6 +1192,9 @@ export async function updateTaskDetails(input: {
   const nextDueDate = input.dueDate || null
 
   const changedAssignment = task.assigneeId !== input.assigneeId
+  const nextAssignee = changedAssignment ? await getUserById(input.assigneeId) : null
+  const nextDepartmentId =
+    changedAssignment && nextAssignee?.departmentId ? nextAssignee.departmentId : task.departmentId
   const changedFields =
     task.title !== title ||
     (task.description ?? null) !== nextDescription ||
@@ -834,6 +1209,7 @@ export async function updateTaskDetails(input: {
       title,
       description: nextDescription,
       assigneeId: input.assigneeId,
+      departmentId: nextDepartmentId,
       priority: input.priority,
       ...(input.category
         ? {
@@ -846,6 +1222,14 @@ export async function updateTaskDetails(input: {
       updatedAt: new Date(),
     })
     .where(eq(tasks.id, input.taskId))
+
+  if (task.projectId && nextAssignee?.departmentId) {
+    const added = await ensureContributingDepartment(task.projectId, nextAssignee.departmentId)
+    if (added.created) {
+      const [project] = await getDb().select().from(projects).where(eq(projects.id, task.projectId)).limit(1)
+      if (project) await notifyDepartmentJoined(project, nextAssignee.departmentId, currentUser.id)
+    }
+  }
 
   if (changedAssignment) {
     await getDb().insert(activityEvents).values({
@@ -893,7 +1277,7 @@ export async function addAttachment(input: {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to attach files to this task.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to attach files to this task.')
 
   const [attachment] = await getDb()
     .insert(taskAttachments)
@@ -931,7 +1315,7 @@ export async function deleteAttachment(attachmentId: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, attachment.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  const mayDelete = attachment.userId === currentUser.id || canEditTask(currentUser, task)
+  const mayDelete = attachment.userId === currentUser.id || canEditTask(currentUser, await taskAccessFor(task))
   if (!mayDelete) return denied('You are not allowed to remove this attachment.')
 
   if (attachment.publicId) {
@@ -963,7 +1347,7 @@ export async function updateTaskProgress(taskId: string, progress: number) {
   if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to update this task.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to update this task.')
 
   const updates: Record<string, unknown> = { progress: clamped, updatedAt: new Date() }
   if (clamped === 100 && task.status !== 'completed') updates.status = 'completed'
@@ -1103,7 +1487,7 @@ export async function createTaskDependency(blockingTaskId: string, blockedTaskId
 
   if (!blockingTask || !blockedTask) return { error: 'One or both tasks not found.' }
   if (blockingTask.companyId !== blockedTask.companyId) return { error: 'Tasks must belong to the same workspace.' }
-  if (!canEditTask(currentUser, blockingTask) || !canEditTask(currentUser, blockedTask)) {
+  if (!canEditTask(currentUser, await taskAccessFor(blockingTask)) || !canEditTask(currentUser, await taskAccessFor(blockedTask))) {
     return denied('You are not allowed to set dependencies on these tasks.')
   }
 
@@ -1157,7 +1541,7 @@ export async function deleteTaskDependency(dependencyId: string) {
   const [blockingTask] = await getDb().select().from(tasks).where(eq(tasks.id, dependency.blockingTaskId)).limit(1)
   const [blockedTask] = await getDb().select().from(tasks).where(eq(tasks.id, dependency.blockedTaskId)).limit(1)
   if (!blockingTask || !blockedTask) return { error: 'One or both tasks not found.' }
-  if (!canEditTask(currentUser, blockingTask) && !canEditTask(currentUser, blockedTask)) {
+  if (!canEditTask(currentUser, await taskAccessFor(blockingTask)) && !canEditTask(currentUser, await taskAccessFor(blockedTask))) {
     return denied('You are not allowed to remove this dependency.')
   }
 
@@ -1188,7 +1572,7 @@ export async function deleteTask(taskId: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canDeleteTask(currentUser, task)) return denied('You are not allowed to delete this task.')
+  if (!canDeleteTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to delete this task.')
 
   const dependents = await getDb()
     .select({ blockedTaskId: taskDependencies.blockedTaskId })
@@ -1238,19 +1622,19 @@ export async function deleteProject(projectId: string, options?: { deleteLinkedT
     .from(projectMilestones)
     .where(eq(projectMilestones.projectId, projectId))
   const milestoneIds = milestones.map((row) => row.id)
-  const linkedTaskIds =
+  const milestoneTaskIds =
     milestoneIds.length === 0
       ? []
-      : [
-          ...new Set(
-            (
-              await getDb()
-                .select({ taskId: projectMilestoneTasks.taskId })
-                .from(projectMilestoneTasks)
-                .where(inArray(projectMilestoneTasks.milestoneId, milestoneIds))
-            ).map((row) => row.taskId),
-          ),
-        ]
+      : (
+          await getDb()
+            .select({ taskId: projectMilestoneTasks.taskId })
+            .from(projectMilestoneTasks)
+            .where(inArray(projectMilestoneTasks.milestoneId, milestoneIds))
+        ).map((row) => row.taskId)
+  const projectTaskIds = (
+    await getDb().select({ id: tasks.id }).from(tasks).where(eq(tasks.projectId, projectId))
+  ).map((row) => row.id)
+  const linkedTaskIds = [...new Set([...milestoneTaskIds, ...projectTaskIds])]
 
   const deleteLinkedTasks = Boolean(options?.deleteLinkedTasks) && linkedTaskIds.length > 0
   if (deleteLinkedTasks) {
@@ -1372,7 +1756,7 @@ export async function approveTask(taskId: string) {
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canSeeTask(currentUser, task)) return denied('You are not allowed to approve this request.')
+  if (!canSeeTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to approve this request.')
 
   await getDb()
     .update(taskApprovals)
@@ -1495,7 +1879,7 @@ export async function createDeliverable(taskId: string, title: string, descripti
 
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to add deliverables to this task.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to add deliverables to this task.')
 
   const [deliverable] = await getDb().insert(deliverables).values({
     companyId: task.companyId,
@@ -1546,7 +1930,7 @@ export async function submitDeliverable(
 
   if (!deliverable) return { error: 'Deliverable not found.' }
   const [taskForSubmit] = await getDb().select().from(tasks).where(eq(tasks.id, deliverable.taskId)).limit(1)
-  if (!taskForSubmit || !canProgressTask(currentUser, taskForSubmit)) {
+  if (!taskForSubmit || !canProgressTask(currentUser, await taskAccessFor(taskForSubmit))) {
     return denied('You are not allowed to submit this deliverable.')
   }
 
@@ -1756,7 +2140,7 @@ export async function completeTask(taskId: string) {
   if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to complete this task.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to complete this task.')
   const shouldRecalculateUnblocked = task.status !== 'completed'
 
   await getDb()
@@ -1792,7 +2176,7 @@ export async function updateTaskStatus(
   if (!currentUser) return { error: 'Not signed in.' }
   const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
-  if (!canProgressTask(currentUser, task)) return denied('You are not allowed to change this task status.')
+  if (!canProgressTask(currentUser, await taskAccessFor(task))) return denied('You are not allowed to change this task status.')
   const shouldRecalculateUnblocked = status === 'completed' && task.status !== 'completed'
   const shouldRequestApproval = status === 'pending_approval'
 

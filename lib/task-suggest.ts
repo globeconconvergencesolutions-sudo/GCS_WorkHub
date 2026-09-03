@@ -24,7 +24,7 @@ const CATEGORY_HINTS: { category: TaskCategory; words: string[] }[] = [
   { category: 'technical', words: ['deploy', 'workhub', 'access', 'server', 'code', 'bug', 'technical', 'digital', 'it ', 'security'] },
   { category: 'administrative', words: ['recruit', 'leave', 'hr ', 'policy', 'contract', 'admin', 'onboard employee'] },
   { category: 'support', words: ['intern', 'attachee', 'helpdesk', 'support', 'ticket'] },
-  { category: 'project', words: ['milestone', 'project', 'delivery track'] },
+  { category: 'operational', words: ['milestone', 'delivery track'] },
   { category: 'operational', words: ['ops', 'operations', 'weekly update', 'scorecard'] },
 ]
 
@@ -47,7 +47,6 @@ const CATEGORY_TO_DEPT: Partial<Record<TaskCategory, string[]>> = {
   administrative: ['hr', 'admin'],
   support: ['intern', 'attache'],
   operational: ['business development', 'md'],
-  project: ['digital', 'business development'],
 }
 
 function haystack(value: string) {

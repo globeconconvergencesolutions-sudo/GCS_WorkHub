@@ -24,13 +24,13 @@ export const TASK_CATEGORY_LABELS: Record<(typeof taskCategoryEnum.enumValues)[n
   finance: 'Finance',
   business_development: 'Business development',
   support: 'Support',
-  project: 'Project',
+  project: 'Delivery work',
   other: 'Other',
 }
 
 export const STANDARD_TASK_CATEGORIES = (
   Object.keys(TASK_CATEGORY_LABELS) as (keyof typeof TASK_CATEGORY_LABELS)[]
-).filter((key) => key !== 'other')
+).filter((key) => key !== 'other' && key !== 'project')
 
 export const ACTIVE_TASK_STATUSES = [
   'not_started',

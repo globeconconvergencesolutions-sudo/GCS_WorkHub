@@ -4,7 +4,9 @@ import {
   canEditTask,
   canInvite,
   canManageOrg,
+  canManageProject,
   canProgressTask,
+  canSeeProject,
   canSeeTask,
   canSubmitLeadershipRequest,
   canSubmitWorkRequest,
@@ -34,9 +36,25 @@ const head = actor('head', 'department_head', 'dept-1')
 const manager = actor('mgr', 'manager', 'dept-1')
 const employee = actor('emp', 'employee', 'dept-1')
 const otherEmployee = actor('emp-2', 'employee', 'dept-2')
+const otherHead = actor('head-2', 'department_head', 'dept-2')
 const ownTask = { assigneeId: 'emp', departmentId: 'dept-1' }
 const deptTask = { assigneeId: 'emp-2', departmentId: 'dept-1' }
 const otherDeptTask = { assigneeId: 'emp-2', departmentId: 'dept-2' }
+const collabTask = {
+  assigneeId: 'emp-2',
+  departmentId: 'dept-2',
+  assigneeDepartmentId: 'dept-2',
+  projectId: 'proj-1',
+  projectHomeDepartmentId: 'dept-1',
+  contributingDepartmentIds: ['dept-2'],
+}
+const homeProject = { ownerId: 'head', departmentId: 'dept-1', contributingDepartmentIds: ['dept-2'] }
+const contributingProject = {
+  ownerId: 'head',
+  departmentId: 'dept-1',
+  contributingDepartmentIds: ['dept-2'],
+  teamUserIds: ['emp-2'],
+}
 
 assert(canManageOrg(admin) && !canManageOrg(md), 'only admin manages org')
 assert(canViewCompanyReports(md) && !canViewCompanyReports(head), 'company reports are management-only')
@@ -54,6 +72,24 @@ assert(!canEditTask(manager, otherDeptTask), 'manager cannot edit other departme
 assert(canEditTask(employee, ownTask) && !canEditTask(employee, deptTask), 'employee edits own details only')
 assert(canDeleteTask(employee, ownTask) && !canDeleteTask(employee, deptTask), 'employee deletes own tasks only')
 assert(canDeleteTask(head, deptTask) && !canDeleteTask(head, otherDeptTask), 'head deletes department tasks only')
+
+assert(canSeeTask(head, collabTask), 'home department head sees contributing work on their project')
+assert(canEditTask(head, collabTask), 'home department head can edit contributing tasks on their project')
+assert(canSeeTask(otherHead, collabTask), 'contributing head sees their slice')
+assert(canEditTask(otherHead, collabTask), 'contributing head can edit their slice')
+assert(
+  !canSeeTask(otherHead, {
+    ...collabTask,
+    assigneeId: 'emp',
+    departmentId: 'dept-1',
+    assigneeDepartmentId: 'dept-1',
+  }),
+  'contributing head does not see home-department tasks',
+)
+assert(canSeeProject(otherHead, contributingProject), 'contributing head can see the project')
+assert(!canManageProject(otherHead, contributingProject), 'contributing head cannot reconfigure the project')
+assert(canManageProject(head, homeProject), 'home department head manages the project')
+assert(canSeeProject(otherEmployee, contributingProject), 'teammate can see the project')
 
 assert(canInvite(md, { roleKey: 'employee', departmentId: 'dept-1' }), 'md can invite staff')
 assert(!canInvite(md, { roleKey: 'admin', departmentId: null }), 'md cannot invite admin')

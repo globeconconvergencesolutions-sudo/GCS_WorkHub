@@ -92,52 +92,83 @@ export function canInvite(
   return false
 }
 
-export function canSeeTask(
-  user: Actor,
-  task: { assigneeId?: string | null; departmentId?: string | null },
-) {
-  if (!user) return false
-  if (isManagement(user)) return true
-  if (isDepartmentLeader(user) && user.departmentId && task.departmentId === user.departmentId) return true
-  return task.assigneeId === user.id
+export type TaskAccess = {
+  assigneeId?: string | null
+  departmentId?: string | null
+  projectId?: string | null
+  assigneeDepartmentId?: string | null
+  projectHomeDepartmentId?: string | null
+  projectOwnerId?: string | null
+  projectTeamUserIds?: string[]
+  contributingDepartmentIds?: string[]
 }
 
-export function canProgressTask(
-  user: Actor,
-  task: { assigneeId?: string | null; departmentId?: string | null },
-) {
-  return canSeeTask(user, task)
+export type ProjectAccess = {
+  ownerId: string
+  departmentId?: string | null
+  teamUserIds?: string[]
+  contributingDepartmentIds?: string[]
 }
 
-export function canEditTask(
-  user: Actor,
-  task: { assigneeId?: string | null; departmentId?: string | null },
-) {
+function isOwnDepartmentSlice(user: Actor, task: TaskAccess) {
+  if (!user?.departmentId) return false
+  return task.departmentId === user.departmentId || task.assigneeDepartmentId === user.departmentId
+}
+
+function isHomeDepartmentOfTaskProject(user: Actor, task: TaskAccess) {
+  return Boolean(user?.departmentId && task.projectHomeDepartmentId === user.departmentId)
+}
+
+function isContributingDepartmentOnTask(user: Actor, task: TaskAccess) {
+  return Boolean(user?.departmentId && task.contributingDepartmentIds?.includes(user.departmentId))
+}
+
+export function canSeeTask(user: Actor, task: TaskAccess) {
   if (!user) return false
   if (isManagement(user)) return true
   if (task.assigneeId === user.id) return true
-  if (isDepartmentLeader(user) && user.departmentId && task.departmentId === user.departmentId) return true
+  if (isDepartmentLeader(user) && isOwnDepartmentSlice(user, task)) return true
+  if (isDepartmentLeader(user) && isHomeDepartmentOfTaskProject(user, task)) return true
+  if (isDepartmentLeader(user) && isContributingDepartmentOnTask(user, task) && isOwnDepartmentSlice(user, task)) {
+    return true
+  }
   return false
 }
 
-export function canDeleteTask(
-  user: Actor,
-  task: { assigneeId?: string | null; departmentId?: string | null },
-) {
+export function canProgressTask(user: Actor, task: TaskAccess) {
+  return canSeeTask(user, task)
+}
+
+export function canEditTask(user: Actor, task: TaskAccess) {
+  if (!user) return false
+  if (isManagement(user)) return true
+  if (task.assigneeId === user.id) return true
+  if (isDepartmentLeader(user) && isOwnDepartmentSlice(user, task)) return true
+  if (isDepartmentLeader(user) && isHomeDepartmentOfTaskProject(user, task)) return true
+  return false
+}
+
+export function canDeleteTask(user: Actor, task: TaskAccess) {
   return canEditTask(user, task)
 }
 
-export function canEditTaskActor(
-  user: Actor,
-  task: { assigneeId?: string | null; departmentId?: string | null },
-) {
+export function canEditTaskActor(user: Actor, task: TaskAccess) {
   return canEditTask(user, task)
 }
 
-export function canManageProject(
-  user: Actor & { id: string } | null,
-  project: { ownerId: string; departmentId?: string | null },
-) {
+export function canSeeProject(user: Actor & { id?: string } | null, project: ProjectAccess) {
+  if (!user) return false
+  if (isManagement(user)) return true
+  if (project.ownerId === user.id) return true
+  if (user.id && project.teamUserIds?.includes(user.id)) return true
+  if (isDepartmentLeader(user) && user.departmentId && project.departmentId === user.departmentId) return true
+  if (isDepartmentLeader(user) && user.departmentId && project.contributingDepartmentIds?.includes(user.departmentId)) {
+    return true
+  }
+  return false
+}
+
+export function canManageProject(user: Actor & { id: string } | null, project: ProjectAccess) {
   if (!user) return false
   if (isManagement(user)) return true
   if (project.ownerId === user.id) return true

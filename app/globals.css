@@ -171,6 +171,8 @@ button, input { font: inherit; }
 .status-not-started { color: oklch(.42 .04 255); background: oklch(.95 .01 255); }.status-not-started .status-dot { background: oklch(.55 .04 255); }
 .status-pending-approval { color: oklch(.48 .12 78); background: oklch(.95 .06 78); }.status-pending-approval .status-dot { background: oklch(.72 .16 78); }
 .status-cancelled { color: oklch(.45 .02 255); background: oklch(.94 .01 255); }.status-cancelled .status-dot { background: oklch(.62 .02 255); }
+.status-contributing { color: oklch(.40 .1 250); background: oklch(.93 .04 250); }.status-contributing .status-dot { background: oklch(.55 .12 250); }
+.status-home { color: oklch(.38 .1 155); background: oklch(.94 .05 155); }.status-home .status-dot { background: oklch(.55 .12 155); }
 .status-badge { padding: 4px 8px; border-radius: 999px; font-weight: 700; }
 .status-in-progress { color: oklch(.36 .12 230); background: oklch(.94 .04 230); }.status-in-progress .status-dot { background: oklch(.55 .14 230); }
 .status-waiting { color: oklch(.48 .13 70); background: oklch(.96 .06 85); }.status-waiting .status-dot { background: oklch(.72 .15 75); }
@@ -315,6 +317,15 @@ button, input { font: inherit; }
 .team-chip span { display: grid; min-width: 0; }
 .team-chip strong { font-size: 11px; }
 .team-chip small { font-size: 9px; color: var(--muted-foreground); }
+.placement-lede { margin: 0 0 14px; }
+.placement-picker { border: 0; margin: 0 0 16px; padding: 0; display: grid; gap: 8px; }
+.placement-picker legend { font-size: 11px; font-weight: 700; margin-bottom: 8px; }
+.placement-card { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); cursor: pointer; }
+.placement-card.is-on { border-color: #22c55e; background: oklch(.96 .025 145); }
+.placement-card input { margin-top: 2px; }
+.placement-card span { display: grid; gap: 2px; }
+.placement-card strong { font-size: 12px; }
+.placement-card small { font-size: 10px; color: var(--muted-foreground); font-weight: 500; }
 .modal-actions svg { width: 14px; }
 .report-row { padding: 8px 0; }
 .attention-list { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
@@ -412,6 +423,9 @@ button, input { font: inherit; }
 .td-primary, .td-aside, .td-section { min-width: 0; }
 .td-aside, .td-progress-card, .td-card { border: 1px solid var(--border); border-radius: 10px; background: var(--background); padding: 14px; display: grid; gap: 10px; }
 .td-aside-note, .td-muted { margin: 0; font-size: 11px; color: var(--muted-foreground); line-height: 1.5; }
+.td-placement { display: grid; gap: 8px; }
+.td-placement > span { font-size: 11px; font-weight: 700; }
+.td-placement-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .td-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .td-progress-row { display: flex; align-items: center; gap: 10px; }
 .td-progress-row strong { font-size: 12px; width: 40px; text-align: right; }

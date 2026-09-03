@@ -24,7 +24,7 @@ export default async function Page({
   }
 
   try {
-    const { currentUser, people, company } = await getWorkspaceContext()
+    const { currentUser, people, directory, departmentDirectory, company } = await getWorkspaceContext()
     const companyName = company?.name ?? 'GCS Operations'
     if (!company) {
       return <SetupScreen missingSeed />
@@ -47,6 +47,8 @@ export default async function Page({
           upcoming={dashboardData.upcoming as unknown as DashboardProps['upcoming']}
           metrics={dashboardData.metrics}
           people={people as unknown as DashboardProps['people']}
+          directory={directory as unknown as DashboardProps['directory']}
+          departmentDirectory={departmentDirectory as unknown as DashboardProps['departmentDirectory']}
           responsibilities={dashboardData.responsibilities as unknown as DashboardProps['responsibilities']}
           allActivity={dashboardData.allActivity as unknown as DashboardProps['allActivity']}
           myTasks={dashboardData.myTasks as unknown as DashboardProps['myTasks']}

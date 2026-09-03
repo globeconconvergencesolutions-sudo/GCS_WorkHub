@@ -42,6 +42,8 @@ export const responsibilityStatusEnum = pgEnum('responsibility_status', [
 
 export const projectStatusEnum = pgEnum('project_status', ['active', 'paused', 'completed', 'archived'])
 
+export const projectDepartmentRoleEnum = pgEnum('project_department_role', ['home', 'contributing'])
+
 export const projectMilestoneStatusEnum = pgEnum('project_milestone_status', [
   'planned',
   'active',
@@ -219,6 +221,7 @@ export const tasks = pgTable(
       .notNull()
       .references(() => companies.id, { onDelete: 'cascade' }),
     departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
     assigneeId: uuid('assignee_id').references(() => users.id, { onDelete: 'set null' }),
     createdById: uuid('created_by_id').references(() => users.id, { onDelete: 'set null' }),
     title: text('title').notNull(),
@@ -236,6 +239,7 @@ export const tasks = pgTable(
   (table) => [
     index('tasks_assignee_idx').on(table.assigneeId),
     index('tasks_department_idx').on(table.departmentId),
+    index('tasks_project_idx').on(table.projectId),
     index('tasks_status_idx').on(table.status),
     index('tasks_due_date_idx').on(table.dueDate),
   ],
@@ -552,12 +556,14 @@ export const responsibilityAssigneesRelations = relations(responsibilityAssignee
 export const tasksRelations = relations(tasks, ({ one, many }) => ({
   company: one(companies, { fields: [tasks.companyId], references: [companies.id] }),
   department: one(departments, { fields: [tasks.departmentId], references: [departments.id] }),
+  project: one(projects, { fields: [tasks.projectId], references: [projects.id] }),
   assignee: one(users, { fields: [tasks.assigneeId], references: [users.id], relationName: 'assignee' }),
   createdBy: one(users, { fields: [tasks.createdById], references: [users.id], relationName: 'createdBy' }),
   comments: many(taskComments),
   attachments: many(taskAttachments),
   approvals: many(taskApprovals),
   deliverables: many(deliverables),
+  milestoneLinks: many(projectMilestoneTasks),
   blockingDependencies: many(taskDependencies, { relationName: 'blockingDependencies' }),
   blockedByDependencies: many(taskDependencies, { relationName: 'blockedByDependencies' }),
 }))
@@ -601,6 +607,24 @@ export const projectTeams = pgTable(
   (table) => [uniqueIndex('project_teams_pk').on(table.projectId, table.userId)],
 )
 
+export const projectDepartments = pgTable(
+  'project_departments',
+  {
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id, { onDelete: 'cascade' }),
+    role: projectDepartmentRoleEnum('role').notNull().default('contributing'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('project_departments_pk').on(table.projectId, table.departmentId),
+    index('project_departments_department_idx').on(table.departmentId),
+  ],
+)
+
 export const projectMilestones = pgTable(
   'project_milestones',
   {
@@ -642,12 +666,19 @@ export const projectsRelations = relations(projects, ({ one, many }) => ({
   owner: one(users, { fields: [projects.ownerId], references: [users.id] }),
   department: one(departments, { fields: [projects.departmentId], references: [departments.id] }),
   teams: many(projectTeams),
+  projectDepartments: many(projectDepartments),
   milestones: many(projectMilestones),
+  tasks: many(tasks),
 }))
 
 export const projectTeamsRelations = relations(projectTeams, ({ one }) => ({
   project: one(projects, { fields: [projectTeams.projectId], references: [projects.id] }),
   user: one(users, { fields: [projectTeams.userId], references: [users.id] }),
+}))
+
+export const projectDepartmentsRelations = relations(projectDepartments, ({ one }) => ({
+  project: one(projects, { fields: [projectDepartments.projectId], references: [projects.id] }),
+  department: one(departments, { fields: [projectDepartments.departmentId], references: [departments.id] }),
 }))
 
 export const projectMilestonesRelations = relations(projectMilestones, ({ one, many }) => ({

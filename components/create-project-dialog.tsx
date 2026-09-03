@@ -41,11 +41,13 @@ function personDepartmentId(person: Person) {
 
 export function CreateProjectDialog({
   people,
+  directory = people,
   currentUserId,
   departments,
   onClose,
 }: {
   people: Person[]
+  directory?: Person[]
   currentUserId: string
   departments: DepartmentOption[]
   onClose: (projectId?: string) => void
@@ -61,9 +63,24 @@ export function CreateProjectDialog({
   const [startDate, setStartDate] = useState(localIsoDate(0))
   const [dueDate, setDueDate] = useState(localIsoDate(30))
   const [teamIds, setTeamIds] = useState<string[]>([currentUserId])
+  const [contributingDepartmentIds, setContributingDepartmentIds] = useState<string[]>([])
 
-  const owner = people.find((person) => person.id === ownerId)
+  const owner = people.find((person) => person.id === ownerId) ?? directory.find((person) => person.id === ownerId)
   const department = departments.find((entry) => entry.id === departmentId)
+  const allowedDepartmentIds = useMemo(() => {
+    const ids = new Set<string>()
+    if (departmentId) ids.add(departmentId)
+    for (const id of contributingDepartmentIds) ids.add(id)
+    return ids
+  }, [departmentId, contributingDepartmentIds])
+  const teamPeople = useMemo(() => {
+    const source = directory.length > 0 ? directory : people
+    return source.filter((person) => {
+      if (person.id === ownerId || teamIds.includes(person.id)) return true
+      const deptId = personDepartmentId(person)
+      return !deptId || allowedDepartmentIds.has(deptId)
+    })
+  }, [directory, people, ownerId, teamIds, allowedDepartmentIds])
   const departmentPeople = useMemo(
     () => (departmentId ? people.filter((person) => personDepartmentId(person) === departmentId) : people),
     [departmentId, people],
@@ -118,6 +135,8 @@ export function CreateProjectDialog({
     formData.delete('teamUserIds')
     const uniqueTeam = new Set([...teamIds, ownerId])
     for (const id of uniqueTeam) formData.append('teamUserIds', id)
+    formData.delete('contributingDepartmentIds')
+    for (const id of contributingDepartmentIds) formData.append('contributingDepartmentIds', id)
     const result = await createProject(formData)
     if (result && 'error' in result && result.error) {
       setError(result.error)
@@ -256,9 +275,39 @@ export function CreateProjectDialog({
                   {title.trim() || 'Untitled'} · {department?.name ?? 'No department'} · {ledBy(owner ? `${owner.firstName} ${owner.lastName}` : null)}
                 </p>
                 <fieldset className="team-picker">
+                  <legend>Contributing departments</legend>
+                  <p className="field-hint">Bring in another function as secondary. They see their slice; your department stays accountable.</p>
+                  <div className="team-picker-grid">
+                    {departments
+                      .filter((entry) => entry.id !== departmentId)
+                      .map((entry) => {
+                        const checked = contributingDepartmentIds.includes(entry.id)
+                        return (
+                          <label key={entry.id} className={`team-chip${checked ? ' is-on' : ''}`}>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setContributingDepartmentIds((current) =>
+                                  current.includes(entry.id)
+                                    ? current.filter((id) => id !== entry.id)
+                                    : [...current, entry.id],
+                                )
+                              }
+                            />
+                            <span>
+                              <strong>{entry.name}</strong>
+                              <small>Secondary</small>
+                            </span>
+                          </label>
+                        )
+                      })}
+                  </div>
+                </fieldset>
+                <fieldset className="team-picker">
                   <legend>Project team</legend>
                   <div className="team-picker-grid">
-                    {people.map((person) => {
+                    {teamPeople.map((person) => {
                       const checked = teamIds.includes(person.id) || person.id === ownerId
                       return (
                         <label key={person.id} className={`team-chip${checked ? ' is-on' : ''}`}>

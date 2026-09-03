@@ -90,6 +90,7 @@ import {
   updateTaskDetails,
   updateTaskProgress,
   updateTaskStatus,
+  setTaskPlacement,
 } from '@/app/actions'
 import type { Person } from '@/lib/types'
 import { taskCategoryEnum, taskPriorityEnum, taskStatusEnum } from '@/lib/db/schema'
@@ -134,6 +135,14 @@ type DbTask = {
   startDate?: string | Date | null
   assignee: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   department: { id?: string; name: string; color?: string } | null
+  projectId?: string | null
+  projectTitle?: string | null
+  milestoneId?: string | null
+  milestoneTitle?: string | null
+  assigneeDepartmentId?: string | null
+  projectHomeDepartmentId?: string | null
+  contributingDepartmentIds?: string[]
+  projectTeamUserIds?: string[]
   comments?: DbComment[]
   attachments?: DbAttachment[]
   approvals?: Array<{
@@ -372,8 +381,11 @@ type DbProject = {
   nextMilestoneDue?: string | Date | null
   tasks: string
   taskIds?: string[]
+  unscheduledTaskIds?: string[]
   departmentId?: string | null
   department?: string | null
+  contributingDepartments?: Array<{ id: string; name: string }>
+  participation?: 'home' | 'contributing' | 'member'
   projectStatus?: string
   health?: string
   activity?: Array<{
@@ -449,6 +461,8 @@ export default function WorkhubDashboardDB({
   upcoming,
   metrics,
   people,
+  directory,
+  departmentDirectory,
   responsibilities,
   allActivity,
   myTasks: initialMyTasks,
@@ -479,6 +493,8 @@ export default function WorkhubDashboardDB({
   upcoming: DbTask[]
   metrics: Metrics
   people: Employee[]
+  directory?: Employee[]
+  departmentDirectory?: Array<{ id: string; name: string; owner?: { firstName: string; lastName: string } | null }>
   responsibilities: DbResponsibility[]
   allActivity: DbActivityEvent[]
   myTasks: DbTask[]
@@ -566,6 +582,18 @@ export default function WorkhubDashboardDB({
     () => people.filter((person) => person.status !== 'inactive'),
     [people],
   )
+  const pickerPeople = useMemo(
+    () => (directory && directory.length > 0 ? directory : people).filter((person) => person.status !== 'inactive'),
+    [directory, people],
+  )
+  const pickerDepartments = (departmentDirectory && departmentDirectory.length > 0
+    ? departmentDirectory
+    : initialDepartments
+  ).map((department) => ({
+    id: department.id,
+    name: department.name,
+    owner: 'owner' in department ? department.owner ?? null : null,
+  }))
 
   const roleSet = useMemo(() => new Set(currentUserRoles), [currentUserRoles])
   const actor = useMemo(
@@ -734,6 +762,8 @@ export default function WorkhubDashboardDB({
         const matchesDepartmentFocus =
           !currentDepartmentId ||
           (task.department?.id ? task.department.id === currentDepartmentId : false)
+        const matchesStandalone =
+          currentView !== 'Departments' || !currentDepartmentId || !task.projectId
 
         return (
           (filter === 'All' || task.status === filter) &&
@@ -741,7 +771,8 @@ export default function WorkhubDashboardDB({
           matchesDeadline &&
           matchesEmployee &&
           matchesProject &&
-          (currentView === 'Departments' ? matchesDepartmentFocus : true)
+          (currentView === 'Departments' ? matchesDepartmentFocus : true) &&
+          matchesStandalone
         )
       })
 
@@ -1256,6 +1287,58 @@ export default function WorkhubDashboardDB({
     })
   }
 
+  async function handleSetTaskPlacement(input: {
+    projectId: string | null
+    milestoneId?: string | null
+    newProjectTitle?: string
+    newProjectDepartmentId?: string
+    newProjectMilestone?: string
+  }) {
+    if (!selectedTask) return { error: 'Task not found.' }
+    const taskId = selectedTask.id
+    const result = await setTaskPlacement({
+      taskId,
+      projectId: input.projectId,
+      milestoneId: input.milestoneId,
+      newProjectTitle: input.newProjectTitle,
+      newProjectDepartmentId: input.newProjectDepartmentId,
+      newProjectMilestone: input.newProjectMilestone,
+    })
+    if (!result || 'error' in result) return { error: result?.error ?? 'Unable to update placement.' }
+
+    const nextProjectId = result.projectId
+    const nextProjectTitle = result.projectTitle
+    const nextMilestoneId = result.milestoneId
+    const nextMilestoneTitle = result.milestoneTitle
+
+    setSelectedTask((current) =>
+      current?.id === taskId
+        ? {
+            ...current,
+            projectId: nextProjectId,
+            projectTitle: nextProjectTitle,
+            milestoneId: nextMilestoneId,
+            milestoneTitle: nextMilestoneTitle,
+          }
+        : current,
+    )
+    setTasks((current) =>
+      current.map((entry) =>
+        entry.id === taskId
+          ? {
+              ...entry,
+              projectId: nextProjectId,
+              projectTitle: nextProjectTitle,
+              milestoneId: nextMilestoneId,
+              milestoneTitle: nextMilestoneTitle,
+            }
+          : entry,
+      ),
+    )
+    router.refresh()
+    return result
+  }
+
   useEffect(() => {
     setDetailsError(null)
     setDetailsSaved(false)
@@ -1444,7 +1527,19 @@ export default function WorkhubDashboardDB({
             <div className="task-main">
               <strong>{task.title}</strong>
               <span>
-                {categoryLabel(task.category, task.categoryCustom)} <i /> Due {formatDue(task.dueDate)}
+                {categoryLabel(task.category, task.categoryCustom)}
+                {task.projectTitle ? (
+                  <>
+                    {' '}
+                    <i /> {task.projectTitle}
+                  </>
+                ) : (
+                  <>
+                    {' '}
+                    <i /> Independent
+                  </>
+                )}{' '}
+                <i /> Due {formatDue(task.dueDate)}
               </span>
             </div>
             <div className="task-owner">
@@ -2159,8 +2254,32 @@ export default function WorkhubDashboardDB({
               </div>
               {selectedDepartment && (
                 <>
+                  <section className="panel" style={{ marginTop: 18 }}>
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Projects in this function</h2>
+                        <p>Home projects and work this department contributes to.</p>
+                      </div>
+                    </div>
+                    <div className="project-grid" style={{ marginTop: 12 }}>
+                      {projects
+                        .filter(
+                          (project) =>
+                            project.departmentId === selectedDepartment.id ||
+                            project.contributingDepartments?.some((entry) => entry.id === selectedDepartment.id),
+                        )
+                        .map((project) => (
+                          <ProjectCard key={project.id} {...project} onOpen={() => nav('Projects', { project: project.id })} />
+                        ))}
+                    </div>
+                    {projects.filter(
+                      (project) =>
+                        project.departmentId === selectedDepartment.id ||
+                        project.contributingDepartments?.some((entry) => entry.id === selectedDepartment.id),
+                    ).length === 0 && <p className="empty-state">No projects for this department yet.</p>}
+                  </section>
                   {taskFilterBar}
-                  {renderTasks(`${selectedDepartment.name} work`, 'Tasks in this department')}
+                  {renderTasks(`${selectedDepartment.name} standalone tasks`, 'Work that is not sitting under a project')}
                 </>
               )}
               <section className="panel table-panel">
@@ -2212,14 +2331,15 @@ export default function WorkhubDashboardDB({
           {activeNav === 'Projects' && selectedProject && (
             <ProjectWorkspace
               project={selectedProject}
-              people={activePeople}
-              departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+              people={pickerPeople}
+              departments={pickerDepartments.map((department) => ({ id: department.id, name: department.name }))}
               tasks={tasks.map((task) => ({
                 id: task.id,
                 title: task.title,
                 status: task.status,
                 dueDate: task.dueDate,
                 assignee: task.assignee,
+                projectId: task.projectId,
               }))}
               canManage={canManageSelectedProject}
               canCreateWork={canCreateWork}
@@ -2234,6 +2354,23 @@ export default function WorkhubDashboardDB({
               }}
               onProjectDeleted={() => nav('Projects')}
               onTaskRemoved={removeTaskFromLocalState}
+              onTaskLinked={(taskId, placement) => {
+                setTasks((current) =>
+                  current.map((entry) =>
+                    entry.id === taskId
+                      ? {
+                          ...entry,
+                          projectId: placement.projectId,
+                          projectTitle: selectedProject.title,
+                          milestoneId: placement.milestoneId,
+                          milestoneTitle:
+                            selectedProject.milestones?.find((milestone) => milestone.id === placement.milestoneId)?.title ??
+                            null,
+                        }
+                      : entry,
+                  ),
+                )
+              }}
               canDeleteLinkedTask={(taskId) => {
                 const task = tasks.find((entry) => entry.id === taskId)
                 return task ? canDeleteTask(actor, task) : false
@@ -2514,8 +2651,8 @@ export default function WorkhubDashboardDB({
       {selectedTask && (
         <TaskDetailSheet
           task={selectedTask}
-          people={activePeople}
-          departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+          people={pickerPeople}
+          departments={pickerDepartments}
           otherTasks={tasks.filter((entry) => entry.id !== selectedTask.id).map((entry) => ({ id: entry.id, title: entry.title }))}
           currentUserId={currentUserId}
           canEdit={canEditSelected}
@@ -2533,6 +2670,18 @@ export default function WorkhubDashboardDB({
           onSave={handleSaveTaskDetails}
           onStatusChange={(status) => handleStatusChange(selectedTask.id, status)}
           onProgressCommit={(progress) => handleProgressChange(selectedTask.id, progress)}
+          projects={projects.map((project) => ({
+            id: project.id,
+            title: project.title,
+            departmentId: project.departmentId,
+            department: project.department,
+            contributingDepartmentIds: project.contributingDepartments?.map((entry) => entry.id) ?? [],
+            teamUserIds: project.team?.map((member) => member.id) ?? [],
+            milestones: project.milestones?.map((milestone) => ({ id: milestone.id, title: milestone.title })) ?? [],
+          }))}
+          canCreateWork={canCreateWork}
+          currentUserDepartmentId={currentUser?.departmentId ?? ''}
+          onSetPlacement={handleSetTaskPlacement}
           commentText={commentText}
           commentError={commentError}
           onCommentText={(value) => { setCommentText(value); setCommentError(null) }}
@@ -2609,16 +2758,24 @@ export default function WorkhubDashboardDB({
       {canCreateWork && showCreate && (
         <CreateTaskDialog
           people={activePeople}
+          directory={pickerPeople}
           currentUserId={currentUserId}
-          departments={initialDepartments.map((department) => ({
-            id: department.id,
-            name: department.name,
-            owner: department.owner ?? null,
+          currentUserDepartmentId={currentUser?.departmentId ?? ''}
+          canAssignAcrossDepartments={isManagement}
+          departments={pickerDepartments}
+          projects={projects.map((project) => ({
+            id: project.id,
+            title: project.title,
+            departmentId: project.departmentId,
+            department: project.department,
+            contributingDepartmentIds: project.contributingDepartments?.map((entry) => entry.id) ?? [],
+            teamUserIds: project.team?.map((member) => member.id) ?? [],
+            milestones: project.milestones?.map((milestone) => ({ id: milestone.id, title: milestone.title })) ?? [],
           }))}
           defaultDepartmentId={selectedProject?.departmentId ?? selectedDepartmentId ?? ''}
+          defaultProjectId={selectedProject?.id ?? ''}
           defaultMilestoneId={createTaskMilestoneId}
-          milestones={selectedProject?.milestones?.map((milestone) => ({ id: milestone.id, title: milestone.title })) ?? []}
-          lockDepartment={Boolean(selectedProject?.departmentId)}
+          lockDepartment={false}
           onClose={() => {
             setShowCreate(false)
             setCreateTaskMilestoneId('')
@@ -2630,12 +2787,9 @@ export default function WorkhubDashboardDB({
       {canCreateWork && showCreateProject && (
         <CreateProjectDialog
           people={activePeople}
+          directory={pickerPeople}
           currentUserId={currentUserId}
-          departments={initialDepartments.map((department) => ({
-            id: department.id,
-            name: department.name,
-            owner: department.owner ?? null,
-          }))}
+          departments={pickerDepartments}
           onClose={(projectId) => {
             setShowCreateProject(false)
             if (projectId) nav('Projects', { project: projectId })
@@ -2872,6 +3026,9 @@ function ProjectCard({
   blockedCount,
   nextMilestone,
   tasks,
+  department,
+  contributingDepartments,
+  participation,
   onOpen,
 }: DbProject & { onOpen?: () => void }) {
   return (
@@ -2879,12 +3036,17 @@ function ProjectCard({
       <div className="project-card-top">
         <span className="project-icon"><BriefcaseBusiness aria-hidden="true" /></span>
         <div className="project-card-badges">
+          {participation === 'contributing' ? <StatusBadge status="Contributing" /> : null}
+          {participation === 'home' ? <StatusBadge status="Home" /> : null}
           <StatusBadge status={status} />
           <StatusBadge status={risk} />
         </div>
       </div>
       <h2>{title}</h2>
-      <p>{ledBy(owner)}</p>
+      <p>{ledBy(owner)}{department ? ` · ${department}` : ''}</p>
+      {contributingDepartments && contributingDepartments.length > 0 ? (
+        <p className="project-card-summary">With {contributingDepartments.map((entry) => entry.name).join(', ')}</p>
+      ) : null}
       {description ? <p className="project-card-summary">{description}</p> : null}
       <div className="project-progress">
         <strong>{completionRate}%</strong>

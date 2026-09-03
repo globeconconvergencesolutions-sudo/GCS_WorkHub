@@ -22,12 +22,15 @@ import { isOverdue } from '@/lib/format'
 import type { CurrentUser } from '@/lib/types'
 import { ensureNotificationPreferences, syncDeadlineAlertsForUser } from '@/lib/notifications/sync-alerts'
 import {
+  canCreateWork,
   canManageOrg,
+  canSeeProject,
   canSeeTask,
   isDepartmentLeader,
   isManagement,
 } from '@/lib/auth/permissions'
 import { buildReport } from '@/lib/reporting/build-report'
+import { projectAccessFromRow, taskAccessFromRow } from '@/lib/db/task-access'
 
 
 export async function getCompany() {
@@ -69,7 +72,9 @@ export async function getWorkspaceContext() {
   const company = await getCompany()
   const currentUser = await getCurrentUser()
   const people = currentUser ? await listPeople(currentUser) : []
-  return { company, currentUser, people }
+  const directory = currentUser ? await listDirectory(currentUser) : []
+  const departmentDirectory = currentUser ? await listDepartmentDirectory(currentUser) : []
+  return { company, currentUser, people, directory, departmentDirectory }
 }
 
 export async function listPeople(viewer?: CurrentUser | null) {
@@ -90,6 +95,31 @@ export async function listPeople(viewer?: CurrentUser | null) {
   return rows.filter((row) => row.id === viewer.id)
 }
 
+export async function listDirectory(viewer?: CurrentUser | null) {
+  if (!viewer || !canCreateWork(viewer)) return listPeople(viewer)
+  if (isManagement(viewer)) return listPeople(viewer)
+
+  return getDb().query.users.findMany({
+    where: eq(users.status, 'active'),
+    with: {
+      department: true,
+      manager: true,
+    },
+    orderBy: [asc(users.firstName), asc(users.lastName)],
+  })
+}
+
+export async function listDepartmentDirectory(viewer?: CurrentUser | null) {
+  const rows = await getDb().query.departments.findMany({
+    with: { owner: true },
+    orderBy: [asc(departments.name)],
+  })
+  if (!viewer) return []
+  if (isManagement(viewer) || canCreateWork(viewer)) return rows
+  if (viewer.departmentId) return rows.filter((row) => row.id === viewer.departmentId)
+  return []
+}
+
 export async function listTasks(options?: { assigneeId?: string; departmentId?: string; viewer?: CurrentUser | null }) {
   const rows = await getDb().query.tasks.findMany({
     where: and(
@@ -99,18 +129,41 @@ export async function listTasks(options?: { assigneeId?: string; departmentId?: 
     with: {
       assignee: true,
       department: true,
+      project: {
+        with: {
+          teams: true,
+          projectDepartments: true,
+        },
+      },
       comments: { with: { user: true } },
       attachments: { with: { user: true } },
       approvals: { with: { requestor: true, approver: true } },
       deliverables: true,
+      milestoneLinks: { with: { milestone: true } },
       blockingDependencies: { with: { blockedTask: true } },
       blockedByDependencies: { with: { blockingTask: true } },
     },
     orderBy: [asc(tasks.dueDate), desc(tasks.createdAt)],
   })
 
-  if (!options?.viewer) return rows
-  return rows.filter((task) => canSeeTask(options.viewer ?? null, task))
+  const withAccess = rows.map((task) => {
+    const access = taskAccessFromRow(task)
+    const link =
+      task.milestoneLinks.find((entry) => !task.projectId || entry.milestone.projectId === task.projectId) ??
+      task.milestoneLinks[0] ??
+      null
+    return {
+      ...task,
+      ...access,
+      projectId: task.projectId,
+      projectTitle: task.project?.title ?? null,
+      milestoneId: link?.milestoneId ?? null,
+      milestoneTitle: link?.milestone.title ?? null,
+    }
+  })
+
+  if (!options?.viewer) return withAccess
+  return withAccess.filter((task) => canSeeTask(options.viewer ?? null, task))
 }
 
 export async function listDepartments(viewer?: CurrentUser | null) {
@@ -204,9 +257,10 @@ export async function listActivity(limit = 12, viewer?: CurrentUser | null) {
       : Promise.resolve([]),
     projectIds.length
       ? getDb()
-          .select({ id: projects.id, departmentId: projects.departmentId, ownerId: projects.ownerId })
-          .from(projects)
-          .where(inArray(projects.id, projectIds))
+          .query.projects.findMany({
+            where: inArray(projects.id, projectIds),
+            with: { projectDepartments: true, teams: true },
+          })
       : Promise.resolve([]),
   ])
   const taskById = new Map(taskRows.map((row) => [row.id, row]))
@@ -217,9 +271,9 @@ export async function listActivity(limit = 12, viewer?: CurrentUser | null) {
     if (isDepartmentLeader(viewer) && viewer.departmentId) {
       if (row.actor?.departmentId === viewer.departmentId) return true
       const task = row.entityType === 'task' && row.entityId ? taskById.get(row.entityId) : null
-      if (task?.departmentId === viewer.departmentId) return true
+      if (task && canSeeTask(viewer, task)) return true
       const project = row.entityType === 'project' && row.entityId ? projectById.get(row.entityId) : null
-      if (project?.departmentId === viewer.departmentId) return true
+      if (project && canSeeProject(viewer, projectAccessFromRow(project))) return true
       return false
     }
     const task = row.entityType === 'task' && row.entityId ? taskById.get(row.entityId) : null
@@ -288,6 +342,8 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
       owner: { with: { department: true } },
       department: true,
       teams: { with: { user: true } },
+      projectDepartments: { with: { department: true } },
+      tasks: true,
       milestones: {
         with: {
           milestoneTasks: {
@@ -304,12 +360,7 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
     if (project.status === 'archived') return false
     const viewer = options?.viewer ?? null
     if (!viewer) return true
-    if (isManagement(viewer)) return true
-    if (project.ownerId === viewer.id) return true
-    if (project.teams.some((entry) => entry.userId === viewer.id)) return true
-    const homeDepartmentId = project.departmentId ?? project.owner?.departmentId ?? null
-    if (isDepartmentLeader(viewer) && viewer.departmentId && homeDepartmentId === viewer.departmentId) return true
-    return false
+    return canSeeProject(viewer, projectAccessFromRow(project))
   })
 
   const projectIds = filteredRows.map((project) => project.id)
@@ -336,17 +387,26 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
         })
 
   return filteredRows.map((project) => {
+    const milestoneTaskMap = new Map(
+      project.milestones.flatMap((milestone) =>
+        milestone.milestoneTasks.map((entry) => [entry.task.id, entry.task]),
+      ),
+    )
+    const projectTasks = [
+      ...project.tasks,
+      ...[...milestoneTaskMap.values()].filter((task) => !project.tasks.some((entry) => entry.id === task.id)),
+    ].filter((task) => task.status !== 'cancelled')
     const allMilestoneTasks = project.milestones
       .flatMap((m) => m.milestoneTasks)
       .filter((mt) => mt.task.status !== 'cancelled')
-    const total = allMilestoneTasks.length
-    const completed = allMilestoneTasks.filter((mt) => mt.task.status === 'completed').length
-    const progressValues = allMilestoneTasks.map((mt) => mt.task.progress ?? 0)
+    const total = projectTasks.length
+    const completed = projectTasks.filter((task) => task.status === 'completed').length
+    const progressValues = projectTasks.map((task) => task.progress ?? 0)
     const progress =
       total === 0 ? project.progress : Math.round(progressValues.reduce((sum, value) => sum + value, 0) / total)
-    const overdueCount = allMilestoneTasks.filter((mt) => isOverdue(mt.task.dueDate, mt.task.status)).length
-    const blockedCount = allMilestoneTasks.filter(
-      (mt) => mt.task.status === 'blocked' || mt.task.status === 'pending_approval',
+    const overdueCount = projectTasks.filter((task) => isOverdue(task.dueDate, task.status)).length
+    const blockedCount = projectTasks.filter(
+      (task) => task.status === 'blocked' || task.status === 'pending_approval',
     ).length
     const health =
       total === 0
@@ -363,7 +423,19 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
     const nextMilestone = [...project.milestones]
       .filter((milestone) => milestone.dueDate)
       .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)))[0]
-    const taskIdSet = new Set(allMilestoneTasks.map((entry) => entry.task.id))
+    const contributingDepartments = project.projectDepartments
+      .filter((entry) => entry.role === 'contributing')
+      .map((entry) => ({ id: entry.department.id, name: entry.department.name }))
+    const viewer = options?.viewer ?? null
+    const participation: 'home' | 'contributing' | 'member' =
+      viewer && viewer.departmentId && project.departmentId === viewer.departmentId
+        ? 'home'
+        : viewer &&
+            viewer.departmentId &&
+            contributingDepartments.some((entry) => entry.id === viewer.departmentId)
+          ? 'contributing'
+          : 'member'
+    const taskIdSet = new Set(projectTasks.map((task) => task.id))
     const activity = activityRows
       .filter(
         (event) =>
@@ -407,7 +479,12 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
       nextMilestone: nextMilestone?.title ?? 'No milestone scheduled',
       nextMilestoneDue: nextMilestone?.dueDate ?? null,
       tasks: `${completed} / ${total}`,
-      taskIds: allMilestoneTasks.map((entry) => entry.task.id),
+      taskIds: projectTasks.map((task) => task.id),
+      unscheduledTaskIds: projectTasks
+        .filter((task) => !allMilestoneTasks.some((entry) => entry.task.id === task.id))
+        .map((task) => task.id),
+      contributingDepartments,
+      participation,
       activity,
       milestones: project.milestones.map((milestone) => ({
         id: milestone.id,

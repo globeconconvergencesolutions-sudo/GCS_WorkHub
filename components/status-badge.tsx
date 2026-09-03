@@ -11,7 +11,8 @@ function badgeClass(status: string) {
   if (normalized === 'waiting' || normalized === 'pending') return 'status-waiting'
   if (normalized === 'pending-approval') return 'status-pending-approval'
   if (normalized === 'not-started') return 'status-not-started'
-  if (normalized === 'cancelled') return 'status-cancelled'
+  if (normalized === 'contributing') return 'status-contributing'
+  if (normalized === 'home') return 'status-home'
   return normalized.startsWith('status-') ? normalized : `status-${normalized}`
 }
 

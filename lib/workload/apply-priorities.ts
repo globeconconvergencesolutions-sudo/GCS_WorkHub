@@ -2,6 +2,7 @@ import { and, eq, inArray } from 'drizzle-orm'
 import {
   activityEvents,
   departments,
+  projectDepartments,
   projectMilestones,
   projectMilestoneTasks,
   projectTeams,
@@ -203,6 +204,20 @@ export async function applyPriorityWorkload(db: unknown) {
     await client.delete(projectTeams).where(eq(projectTeams.projectId, project.id))
     await client.insert(projectTeams).values(teamIds.map((userId) => ({ projectId: project.id, userId })))
 
+    await client.delete(projectDepartments).where(eq(projectDepartments.projectId, project.id))
+    const collabDepartments = new Set<string>([department.id])
+    for (const userId of teamIds) {
+      const member = allUsers.find((person) => person.id === userId)
+      if (member?.departmentId) collabDepartments.add(member.departmentId)
+    }
+    await client.insert(projectDepartments).values(
+      [...collabDepartments].map((deptId) => ({
+        projectId: project.id,
+        departmentId: deptId,
+        role: (deptId === department.id ? 'home' : 'contributing') as 'home' | 'contributing',
+      })),
+    )
+
     for (const milestoneSpec of spec.milestones) {
       const existingMilestone = await client
         .select()
@@ -246,7 +261,8 @@ export async function applyPriorityWorkload(db: unknown) {
           .limit(1)
         const payload = {
           companyId,
-          departmentId: department.id,
+          departmentId: assignee.departmentId ?? department.id,
+          projectId: project.id,
           assigneeId: assignee.id,
           createdById: createdBy.id,
           title: taskSpec.title,
@@ -280,6 +296,25 @@ export async function applyPriorityWorkload(db: unknown) {
           .limit(1)
         if (!existingLink[0]) {
           await client.insert(projectMilestoneTasks).values({ milestoneId: milestone.id, taskId: task.id })
+        }
+        if (assignee.departmentId && assignee.departmentId !== department.id) {
+          const already = await client
+            .select()
+            .from(projectDepartments)
+            .where(
+              and(
+                eq(projectDepartments.projectId, project.id),
+                eq(projectDepartments.departmentId, assignee.departmentId),
+              ),
+            )
+            .limit(1)
+          if (!already[0]) {
+            await client.insert(projectDepartments).values({
+              projectId: project.id,
+              departmentId: assignee.departmentId,
+              role: 'contributing',
+            })
+          }
         }
 
         if (taskSpec.comment) {
