@@ -283,7 +283,7 @@ async function seed() {
         companyId: company.id,
         departmentId: dept['client-services'].id,
         teamId: teamByName['Delivery'],
-        email: 'calvin@globeoncs.com',
+        email: 'calvin@globeconcs.com',
         firstName: 'Calvin',
         lastName: 'Klein',
         jobTitle: 'Communications & Marketing Lead',

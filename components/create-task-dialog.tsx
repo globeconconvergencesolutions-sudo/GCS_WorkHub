@@ -160,7 +160,7 @@ export function CreateTaskDialog({
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <div
-        className="create-modal create-task-modal"
+        className="create-modal create-task-modal workspace-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-task-title"
@@ -177,6 +177,7 @@ export function CreateTaskDialog({
             </button>
           </div>
 
+          <div className="workspace-sheet-body">
           <label htmlFor="task-title">Task name</label>
           <input
             id="task-title"
@@ -307,7 +308,8 @@ export function CreateTaskDialog({
             placeholder="Outcome, context, and what done looks like..."
           />
           {error && <p className="form-error">{error}</p>}
-          <div className="modal-actions">
+          </div>
+          <div className="modal-actions workspace-sheet-footer">
             <Button variant="outline" type="button" onClick={onClose}>
               Cancel
             </Button>

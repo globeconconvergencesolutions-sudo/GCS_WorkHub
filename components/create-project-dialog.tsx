@@ -129,7 +129,7 @@ export function CreateProjectDialog({
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => onClose()}>
       <div
-        className="create-modal create-project-modal"
+          className="create-modal create-project-modal workspace-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="create-project-title"
@@ -284,7 +284,7 @@ export function CreateProjectDialog({
           </div>
 
           {error && <p className="form-error">{error}</p>}
-          <div className="modal-actions">
+          <div className="modal-actions workspace-sheet-footer">
             {step === 1 ? (
               <Button variant="outline" type="button" onClick={() => onClose()}>
                 Cancel

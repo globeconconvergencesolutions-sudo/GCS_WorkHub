@@ -18,7 +18,6 @@ import {
   LayoutDashboard,
   Loader2,
   MessageSquare,
-  Paperclip,
   Plus,
   Settings2,
   ShieldCheck,
@@ -32,6 +31,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { CreateTaskDialog } from '@/components/create-task-dialog'
 import { CreateProjectDialog } from '@/components/create-project-dialog'
 import { CreateResponsibilityDialog } from '@/components/create-responsibility-dialog'
+import { TaskDetailSheet, type TaskDetailTab } from '@/components/task-detail-sheet'
 import { InviteEmployeeDialog } from '@/components/invite-employee-dialog'
 import { OrgSettingsPanel } from '@/components/org-settings-panel'
 import { ProjectWorkspace } from '@/components/project-workspace'
@@ -40,13 +40,13 @@ import {
   TASK_PRIORITY_LABELS,
   TASK_STATUS_LABELS,
 } from '@/lib/constants'
-import { CategoryField } from '@/components/category-field'
-import { formatDue, formatLongDate, formatRelative, fullName, greeting, categoryLabel, ledBy } from '@/lib/format'
+import { formatDue, formatLongDate, formatRelative, fullName, greeting, categoryLabel, ledBy, toDateInputValue } from '@/lib/format'
 import { signOutToLogin } from '@/lib/auth/sign-out-client'
 import { resolveWorkspaceView, type WorkspaceView } from '@/lib/workspace-nav'
 import {
   canCreateWork as roleCanCreateWork,
   canEditTask,
+  canProgressTask,
   canManageOrg,
   canManageUsers,
   canSubmitLeadershipRequest,
@@ -58,6 +58,8 @@ import {
 import {
   addAttachment,
   addComment,
+  deleteAttachment,
+  deleteComment,
   createTaskDependency,
   approveTask,
   approveDeliverable,
@@ -95,6 +97,7 @@ type DbComment = {
   id: string
   body: string
   createdAt: string | Date
+  userId?: string | null
   user: { initials: string; firstName: string; lastName: string } | null
 }
 
@@ -102,7 +105,12 @@ type DbAttachment = {
   id: string
   label: string
   url: string
+  publicId?: string | null
+  bytes?: number | null
+  mimeType?: string | null
+  originalName?: string | null
   createdAt: string | Date
+  userId?: string | null
 }
 
 type DbTask = {
@@ -135,6 +143,9 @@ type DbTask = {
     description?: string | null
     status: string
     evidenceUrl: string | null
+    evidencePublicId?: string | null
+    evidenceBytes?: number | null
+    evidenceOriginalName?: string | null
     submissionNotes?: string | null
     decisionReason?: string | null
   }>
@@ -470,24 +481,39 @@ export default function WorkhubDashboardDB({
   const [showCreateResp, setShowCreateResp] = useState(false)
   const [respFilter, setRespFilter] = useState<'all' | 'mine'>('all')
   const [commentText, setCommentText] = useState('')
+  const [commentError, setCommentError] = useState<string | null>(null)
   const [attachLabel, setAttachLabel] = useState('')
   const [attachUrl, setAttachUrl] = useState('')
   const [showAttachForm, setShowAttachForm] = useState(false)
+  const [attachError, setAttachError] = useState<string | null>(null)
+  const [detailsError, setDetailsError] = useState<string | null>(null)
+  const [detailsSaved, setDetailsSaved] = useState(false)
+  const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null)
   const [dependencyBlockingTaskId, setDependencyBlockingTaskId] = useState('')
   const [approvalReason, setApprovalReason] = useState('')
   const [approvalError, setApprovalError] = useState<string | null>(null)
   const [deliverableTitle, setDeliverableTitle] = useState('')
   const [deliverableDescription, setDeliverableDescription] = useState('')
   const [deliverableEvidenceById, setDeliverableEvidenceById] = useState<Record<string, string>>({})
+  const [deliverableEvidenceMetaById, setDeliverableEvidenceMetaById] = useState<Record<string, { publicId?: string; bytes?: number; mimeType?: string; originalName?: string }>>({})
   const [deliverableNotesById, setDeliverableNotesById] = useState<Record<string, string>>({})
   const [deliverableError, setDeliverableError] = useState<string | null>(null)
   const [deliverableDecisionById, setDeliverableDecisionById] = useState<Record<string, string>>({})
+  const [detailsSaving, setDetailsSaving] = useState(false)
+  const [detailTab, setDetailTab] = useState<TaskDetailTab>('overview')
+  const [clockLabel, setClockLabel] = useState('')
+  const [hello, setHello] = useState('Hello')
   const [isPending, startTransition] = useTransition()
 
   const currentUser = useMemo(
     () => people.find((p) => p.id === currentUserId) ?? null,
     [people, currentUserId],
   )
+
+  useEffect(() => {
+    setClockLabel(formatLongDate())
+    setHello(greeting())
+  }, [])
   const activePeople = useMemo(
     () => people.filter((person) => person.status !== 'inactive'),
     [people],
@@ -515,6 +541,8 @@ export default function WorkhubDashboardDB({
   const inviteRoleKeys = inviteableRoleKeys(actor)
   const canInvitePeople = inviteRoleKeys.length > 0
   const inviteRoles = workspaceRoles.filter((role) => inviteRoleKeys.includes(role.key as (typeof inviteRoleKeys)[number]))
+  const canEditSelected = selectedTask ? canEditTask(actor, selectedTask) : false
+  const canProgressSelected = selectedTask ? canProgressTask(actor, selectedTask) : false
 
   const navItems: { label: View; icon: typeof LayoutDashboard; count?: number; group: string }[] = [
     ...(isManagement
@@ -711,37 +739,103 @@ export default function WorkhubDashboardDB({
 
   function handleAddComment(taskId: string) {
     if (!commentText.trim()) return
+    const body = commentText.trim()
     startTransition(async () => {
-      const res = await addComment(taskId, commentText)
-      if (!res || !('error' in res)) {
-        const newComment: DbComment = {
-          id: Date.now().toString(),
-          body: commentText.trim(),
-          createdAt: new Date().toISOString(),
-          user: currentUser ? { initials: currentUser.initials, firstName: currentUser.firstName, lastName: currentUser.lastName } : null,
-        }
-        setSelectedTask((current) => current?.id === taskId ? { ...current, comments: [...(current.comments ?? []), newComment] } : current)
-        setCommentText('')
+      const res = await addComment(taskId, body)
+      if (res && 'error' in res && res.error) {
+        setCommentError(res.error)
+        return
       }
+      setCommentError(null)
+      const saved = res && 'comment' in res ? res.comment : null
+      const newComment: DbComment = saved ?? {
+        id: Date.now().toString(),
+        body,
+        createdAt: new Date().toISOString(),
+        userId: currentUserId,
+        user: currentUser ? { initials: currentUser.initials, firstName: currentUser.firstName, lastName: currentUser.lastName } : null,
+      }
+      setSelectedTask((current) => current?.id === taskId ? { ...current, comments: [...(current.comments ?? []), newComment] } : current)
+      setCommentText('')
     })
+  }
+
+  function handleDeleteComment(commentId: string) {
+    startTransition(async () => {
+      const res = await deleteComment(commentId)
+      if (res && 'error' in res && res.error) {
+        setCommentError(res.error)
+        return
+      }
+      setSelectedTask((current) =>
+        current ? { ...current, comments: (current.comments ?? []).filter((comment) => comment.id !== commentId) } : current,
+      )
+    })
+  }
+
+  async function persistAttachment(taskId: string, payload: {
+    label: string
+    url: string
+    publicId?: string | null
+    bytes?: number | null
+    mimeType?: string | null
+    originalName?: string | null
+  }) {
+    const res = await addAttachment({ taskId, ...payload })
+    if (res && 'error' in res && res.error) {
+      setAttachError(res.error)
+      throw new Error(res.error)
+    }
+    setAttachError(null)
+    const saved = res && 'attachment' in res ? res.attachment : null
+    const newAttach: DbAttachment = saved ?? {
+      id: Date.now().toString(),
+      label: payload.label,
+      url: payload.url,
+      publicId: payload.publicId,
+      bytes: payload.bytes,
+      mimeType: payload.mimeType,
+      originalName: payload.originalName,
+      createdAt: new Date().toISOString(),
+      userId: currentUserId,
+    }
+    setSelectedTask((current) => current?.id === taskId ? { ...current, attachments: [...(current.attachments ?? []), newAttach] } : current)
+    setTasks((current) => current.map((task) => task.id === taskId ? { ...task, attachments: [...(task.attachments ?? []), newAttach] } : task))
+    setAttachLabel('')
+    setAttachUrl('')
+    setShowAttachForm(false)
   }
 
   function handleAddAttachment(taskId: string) {
     if (!attachLabel.trim() || !attachUrl.trim()) return
     startTransition(async () => {
-      const res = await addAttachment(taskId, attachLabel, attachUrl)
-      if (!res || !('error' in res)) {
-        const newAttach: DbAttachment = {
-          id: Date.now().toString(),
-          label: attachLabel.trim(),
-          url: attachUrl.trim(),
-          createdAt: new Date().toISOString(),
-        }
-        setSelectedTask((current) => current?.id === taskId ? { ...current, attachments: [...(current.attachments ?? []), newAttach] } : current)
-        setAttachLabel('')
-        setAttachUrl('')
-        setShowAttachForm(false)
+      try {
+        await persistAttachment(taskId, { label: attachLabel.trim(), url: attachUrl.trim() })
+      } catch {
+        // persistAttachment already set attachError
       }
+    })
+  }
+
+  function handleDeleteAttachment(attachmentId: string) {
+    setDeletingAttachmentId(attachmentId)
+    startTransition(async () => {
+      const res = await deleteAttachment(attachmentId)
+      setDeletingAttachmentId(null)
+      if (res && 'error' in res && res.error) {
+        setAttachError(res.error)
+        return
+      }
+      setSelectedTask((current) =>
+        current ? { ...current, attachments: (current.attachments ?? []).filter((item) => item.id !== attachmentId) } : current,
+      )
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === selectedTask?.id
+            ? { ...task, attachments: (task.attachments ?? []).filter((item) => item.id !== attachmentId) }
+            : task,
+        ),
+      )
     })
   }
 
@@ -830,8 +924,6 @@ export default function WorkhubDashboardDB({
         setTasks((current) => current.map((t) => (t.id === task.id ? { ...t, deliverables: [...(t.deliverables ?? []), newDeliverable] } : t)))
         setDeliverableTitle('')
         setDeliverableDescription('')
-        setDeliverableEvidenceById({})
-        setDeliverableNotesById({})
       } else {
         setDeliverableError(res.error ?? 'Unable to complete this action.')
       }
@@ -842,43 +934,56 @@ export default function WorkhubDashboardDB({
     if (!deliverableId || !selectedTask) return
     const task = selectedTask
     const evidenceUrl = deliverableEvidenceById[deliverableId] ?? ''
+    const evidenceMeta = deliverableEvidenceMetaById[deliverableId]
     const notes = deliverableNotesById[deliverableId] ?? ''
-    if (!evidenceUrl.trim()) return
+    if (!evidenceUrl.trim()) {
+      setDeliverableError('Upload a file or paste an https evidence link first.')
+      return
+    }
 
     startTransition(async () => {
       setDeliverableError(null)
-      const res = await submitDeliverable(deliverableId, evidenceUrl, notes)
-      if (!res || !('error' in res)) {
-        const updated = res.deliverable
-        setSelectedTask((current) => {
-          if (!current || current.id !== task.id) return current
-          return {
-            ...current,
-            deliverables: (current.deliverables ?? []).map((d) => (d.id === deliverableId ? updated : d)),
-          }
-        })
-        setTasks((current) =>
-          current.map((t) => {
-            if (t.id !== selectedTask.id) return t
-            return {
-              ...t,
-              deliverables: (t.deliverables ?? []).map((d) => (d.id === deliverableId ? updated : d)),
-            }
-          }),
-        )
-        setDeliverableEvidenceById((m) => {
-          const next = { ...m }
-          delete next[deliverableId]
-          return next
-        })
-        setDeliverableNotesById((m) => {
-          const next = { ...m }
-          delete next[deliverableId]
-          return next
-        })
-      } else {
-        setDeliverableError(res.error ?? 'Unable to complete this action.')
+      const res = await submitDeliverable(deliverableId, evidenceUrl, notes, evidenceMeta)
+      if (res && 'error' in res && res.error) {
+        setDeliverableError(res.error)
+        return
       }
+      if (!res || !('deliverable' in res)) {
+        setDeliverableError('Unable to submit this deliverable.')
+        return
+      }
+      const updated = res.deliverable
+      setSelectedTask((current) => {
+        if (!current || current.id !== task.id) return current
+        return {
+          ...current,
+          deliverables: (current.deliverables ?? []).map((d) => (d.id === deliverableId ? updated : d)),
+        }
+      })
+      setTasks((current) =>
+        current.map((t) => {
+          if (t.id !== selectedTask.id) return t
+          return {
+            ...t,
+            deliverables: (t.deliverables ?? []).map((d) => (d.id === deliverableId ? updated : d)),
+          }
+        }),
+      )
+      setDeliverableEvidenceById((m) => {
+        const next = { ...m }
+        delete next[deliverableId]
+        return next
+      })
+      setDeliverableEvidenceMetaById((m) => {
+        const next = { ...m }
+        delete next[deliverableId]
+        return next
+      })
+      setDeliverableNotesById((m) => {
+        const next = { ...m }
+        delete next[deliverableId]
+        return next
+      })
     })
   }
 
@@ -986,23 +1091,59 @@ export default function WorkhubDashboardDB({
     const assigneeId = selectedTask.assigneeId
 
     startTransition(async () => {
-      const res = await updateTaskDetails({
-        taskId: task.id,
-        title: task.title,
-        description: task.description ?? '',
-        assigneeId,
-        priority: task.priority,
-        category: task.category,
-        categoryCustom: task.categoryCustom ?? null,
-        startDate: task.startDate ? new Date(task.startDate).toISOString().slice(0, 10) : null,
-        dueDate: task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : null,
-      })
+      setDetailsSaving(true)
+      try {
+        const res = await updateTaskDetails({
+          taskId: task.id,
+          title: task.title,
+          description: task.description ?? '',
+          assigneeId,
+          priority: task.priority,
+          category: task.category,
+          categoryCustom: task.categoryCustom ?? null,
+          startDate: toDateInputValue(task.startDate) || null,
+          dueDate: toDateInputValue(task.dueDate) || null,
+        })
 
-      if (!res || !('error' in res)) {
+        if (res && 'error' in res && res.error) {
+          setDetailsSaved(false)
+          setDetailsError(res.error)
+          return
+        }
+        setDetailsError(null)
+        setDetailsSaved(true)
         setTasks((current) => current.map((t) => (t.id === task.id ? { ...task } : t)))
+      } finally {
+        setDetailsSaving(false)
       }
     })
   }
+
+  useEffect(() => {
+    setDetailsError(null)
+    setDetailsSaved(false)
+    setAttachError(null)
+    setCommentError(null)
+    setShowAttachForm(false)
+    setDetailTab('overview')
+  }, [selectedTask?.id])
+
+  useEffect(() => {
+    if (!selectedTask) return
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setSelectedTask(null)
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        handleSaveTaskDetails()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedTask])
 
   function handleTakeResponsibility(responsibilityId: string) {
     if (!currentUser) return
@@ -1399,8 +1540,8 @@ export default function WorkhubDashboardDB({
           {activeNav === 'Home' && (
             <>
               <ViewHeading
-                eyebrow={formatLongDate()}
-                title={`${greeting()}, ${currentUser?.firstName ?? 'there'}`}
+                eyebrow={clockLabel || 'Today'}
+                title={`${hello}, ${currentUser?.firstName ?? 'there'}`}
                 description="What needs a decision across GCS today."
                 action={canCreateWork ? () => setShowCreate(true) : undefined}
                 actionLabel="Create task"
@@ -1525,8 +1666,8 @@ export default function WorkhubDashboardDB({
           {activeNav === 'Overview' && (
             <>
               <ViewHeading
-                eyebrow={formatLongDate()}
-                title={`${greeting()}, ${currentUser?.firstName ?? 'there'}`}
+                eyebrow={clockLabel || 'Today'}
+                title={`${hello}, ${currentUser?.firstName ?? 'there'}`}
                 description={
                   canRequestWork
                     ? 'Your assignments, requests, and anything you have been invited into.'
@@ -2113,547 +2254,80 @@ export default function WorkhubDashboardDB({
         </div>
 
       {selectedTask && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setSelectedTask(null)}>
-          <div className="create-modal task-detail-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-heading">
-              <div><span className="eyebrow">Task details</span><h2 id="task-detail-title">{selectedTask.title}</h2></div>
-              <button className="close-button" aria-label="Close task details" onClick={() => setSelectedTask(null)}><X aria-hidden="true" /></button>
-            </div>
-            <div className="detail-grid">
-              <div>
-                <span className="detail-label">Led by</span>
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {selectedTask.assignee && (
-                    <strong>
-                      <Avatar initials={selectedTask.assignee.initials} tone="avatar-small" /> {fullName(selectedTask.assignee)}
-                    </strong>
-                  )}
-                  <select
-                    value={selectedTask.assigneeId ?? ''}
-                    onChange={(event) => {
-                      const nextId = event.target.value
-                      const nextPerson = people.find((person) => person.id === nextId) ?? null
-                      setSelectedTask((current) =>
-                        current?.id === selectedTask.id
-                          ? {
-                              ...current,
-                              assigneeId: nextId,
-                              assignee: nextPerson
-                                ? {
-                                    initials: nextPerson.initials,
-                                    firstName: nextPerson.firstName,
-                                    lastName: nextPerson.lastName,
-                                  }
-                                : null,
-                            }
-                          : current,
-                      )
-                    }}
-                    disabled={isPending}
-                  >
-                    {activePeople.map((person) => (
-                      <option key={person.id} value={person.id}>
-                        {person.firstName} {person.lastName}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <span className="detail-label">Category</span>
-                <CategoryField
-                  showLabel={false}
-                  value={selectedTask.category}
-                  customValue={selectedTask.categoryCustom ?? ''}
-                  onChange={(nextCategory, nextCustom) =>
-                    setSelectedTask((current) =>
-                      current?.id === selectedTask.id
-                        ? {
-                            ...current,
-                            category: nextCategory as TaskCategory,
-                            categoryCustom: nextCategory === 'other' ? nextCustom : null,
-                          }
-                        : current,
-                    )
-                  }
-                />
-              </div>
-              <div>
-                <span className="detail-label">Priority</span>
-                <div style={{ display: 'grid', gap: 8 }}>
-                  <StatusBadge status={TASK_PRIORITY_LABELS[selectedTask.priority]} />
-                  <select
-                    value={selectedTask.priority}
-                    onChange={(event) =>
-                      setSelectedTask((current) =>
-                        current?.id === selectedTask.id
-                          ? { ...current, priority: event.target.value as TaskPriority }
-                          : current,
-                      )
-                    }
-                    disabled={isPending}
-                  >
-                    {Object.entries(TASK_PRIORITY_LABELS).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <span className="detail-label">Timeline</span>
-                <div style={{ display: 'grid', gap: 8 }}>
-                  <strong>{formatDue(selectedTask.startDate)} → {formatDue(selectedTask.dueDate)}</strong>
-                  <div style={{ display: 'grid', gap: 6 }}>
-                    <input
-                      type="date"
-                      value={selectedTask.startDate ? new Date(selectedTask.startDate).toISOString().slice(0, 10) : ''}
-                      onChange={(event) =>
-                        setSelectedTask((current) =>
-                          current?.id === selectedTask.id
-                            ? { ...current, startDate: event.target.value || null }
-                            : current,
-                        )
-                      }
-                      disabled={isPending}
-                    />
-                    <input
-                      type="date"
-                      value={selectedTask.dueDate ? new Date(selectedTask.dueDate).toISOString().slice(0, 10) : ''}
-                      onChange={(event) =>
-                        setSelectedTask((current) =>
-                          current?.id === selectedTask.id
-                            ? { ...current, dueDate: event.target.value || null }
-                            : current,
-                        )
-                      }
-                      disabled={isPending}
-                    />
-                  </div>
-                </div>
-              </div>
-              <div>
-                <span className="detail-label">Evidence</span>
-                <strong><Paperclip aria-hidden="true" /> {selectedTask.attachments?.length ?? 0} attachments</strong>
-              </div>
-            </div>
-            <div style={{ display: 'grid', gap: 10 }}>
-              <label className="form-field">
-                <span>Task title</span>
-                <input
-                  value={selectedTask.title}
-                  onChange={(event) =>
-                    setSelectedTask((current) =>
-                      current?.id === selectedTask.id ? { ...current, title: event.target.value } : current,
-                    )
-                  }
-                  disabled={isPending}
-                />
-              </label>
-              <label className="form-field">
-                <span>Description</span>
-                <textarea
-                  value={selectedTask.description ?? ''}
-                  onChange={(event) =>
-                    setSelectedTask((current) =>
-                      current?.id === selectedTask.id
-                        ? { ...current, description: event.target.value }
-                        : current,
-                    )
-                  }
-                  placeholder="No description added yet."
-                  disabled={isPending}
-                />
-              </label>
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <button
-                  className="filter-pill selected"
-                  style={{ fontSize: 10 }}
-                  disabled={isPending || !selectedTask.assigneeId || !selectedTask.title.trim()}
-                  onClick={handleSaveTaskDetails}
-                >
-                  Save task details
-                </button>
-              </div>
-            </div>
-
-            <div className="form-grid">
-              <label>
-                <span className="detail-label">Status</span>
-                <select
-                  value={selectedTask.status}
-                  onChange={(event) => handleStatusChange(selectedTask.id, event.target.value as TaskStatus)}
-                  disabled={isPending}
-                >
-                  {taskStatusEnum.enumValues.map((status) => (
-                    <option key={status} value={status}>{TASK_STATUS_LABELS[status]}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span className="detail-label">Progress</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={selectedTask.progress ?? 0}
-                    onChange={(e) => {
-                      const val = Number(e.target.value)
-                      setSelectedTask((c) => c?.id === selectedTask.id ? { ...c, progress: val } : c)
-                    }}
-                    onMouseUp={(e) => handleProgressChange(selectedTask.id, Number((e.target as HTMLInputElement).value))}
-                    onTouchEnd={(e) => handleProgressChange(selectedTask.id, Number((e.target as HTMLInputElement).value))}
-                    style={{ flex: 1, accentColor: 'oklch(.55 .11 175)' }}
-                    disabled={isPending}
-                  />
-                  <strong style={{ fontSize: 12, width: 36, textAlign: 'right' }}>{selectedTask.progress ?? 0}%</strong>
-                </div>
-              </label>
-            </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 16 }}>
-              <span className="detail-label" style={{ marginBottom: 10, display: 'block' }}>Attachments ({selectedTask.attachments?.length ?? 0})</span>
-              {(selectedTask.attachments ?? []).length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
-                  {selectedTask.attachments!.map((a) => (
-                    <a key={a.id} href={a.url} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'oklch(.43 .09 175)', fontWeight: 700, textDecoration: 'none' }}>
-                      <Paperclip style={{ width: 12 }} aria-hidden="true" /> {a.label}
-                    </a>
-                  ))}
-                </div>
-              )}
-              {showAttachForm ? (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <input value={attachLabel} onChange={(e) => setAttachLabel(e.target.value)} placeholder="Label" style={{ flex: '1 1 120px', fontSize: 11, padding: '6px 8px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }} />
-                  <input value={attachUrl} onChange={(e) => setAttachUrl(e.target.value)} placeholder="https://..." style={{ flex: '2 1 180px', fontSize: 11, padding: '6px 8px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }} />
-                  <button className="filter-pill selected" style={{ fontSize: 10 }} disabled={isPending || !attachLabel.trim() || !attachUrl.trim()} onClick={() => handleAddAttachment(selectedTask.id)}>Add</button>
-                  <button className="filter-pill" style={{ fontSize: 10 }} onClick={() => { setShowAttachForm(false); setAttachLabel(''); setAttachUrl('') }}>Cancel</button>
-                </div>
-              ) : (
-                <button className="filter-pill" style={{ fontSize: 10 }} onClick={() => setShowAttachForm(true)}>
-                  <Paperclip style={{ width: 11, marginRight: 4 }} aria-hidden="true" /> Link document
-                </button>
-              )}
-            </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 16 }}>
-              <span className="detail-label" style={{ marginBottom: 10, display: 'block' }}>Comments ({selectedTask.comments?.length ?? 0})</span>
-              {(selectedTask.comments ?? []).length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
-                  {selectedTask.comments!.map((c) => (
-                    <div key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                      <Avatar initials={c.user?.initials ?? 'G'} tone="avatar-small" />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <strong style={{ fontSize: 10 }}>{c.user ? fullName(c.user) : 'System'}</strong>
-                        <p style={{ fontSize: 11, color: 'var(--foreground)', margin: '3px 0 2px', lineHeight: 1.5 }}>{c.body}</p>
-                        <small style={{ fontSize: 9, color: 'var(--muted-foreground)' }}>{formatRelative(new Date(c.createdAt))}</small>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  value={commentText}
-                  onChange={(e) => setCommentText(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAddComment(selectedTask.id) } }}
-                  placeholder="Add a comment..."
-                  style={{ flex: 1, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                  disabled={isPending}
-                />
-                <button className="filter-pill selected" style={{ fontSize: 10 }} disabled={isPending || !commentText.trim()} onClick={() => handleAddComment(selectedTask.id)}>Send</button>
-              </div>
-            </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 16 }}>
-              <span className="detail-label" style={{ marginBottom: 10, display: 'block' }}>Approvals</span>
-
-              {(selectedTask.approvals ?? []).length === 0 && (
-                <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>No approvals yet</span>
-              )}
-
-              {(selectedTask.approvals ?? []).length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-                  {selectedTask.approvals!.slice(0, 4).map((a) => (
-                    <div key={a.id} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                      <span className="filter-pill" style={{ fontSize: 10 }}>{a.status}</span>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 10, color: 'var(--muted-foreground)', fontWeight: 800 }}>
-                          {a.approver ? `${a.approver.firstName} ${a.approver.lastName}` : 'Approver'}
-                        </div>
-                        {a.decisionReason && (
-                          <div style={{ fontSize: 11, marginTop: 4, color: 'var(--foreground)' }}>
-                            {a.decisionReason}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {selectedTask.status === 'pending_approval' && (
-                <div style={{ display: 'grid', gap: 10 }}>
-                  <label style={{ fontSize: 10, fontWeight: 800 }}>
-                    Decision note (required for reject/revision)
-                    <textarea
-                      value={approvalReason}
-                      onChange={(e) => setApprovalReason(e.target.value)}
-                      placeholder="Add a clear note for the requester…"
-                      style={{ width: '100%', marginTop: 6, minHeight: 80, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                      disabled={isPending}
-                    />
-                  </label>
-
-                  {approvalError && <p className="form-error">{approvalError}</p>}
-
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <button className="filter-pill selected" style={{ fontSize: 10 }} disabled={isPending} onClick={handleApproveCurrentTask}>
-                      Approve
-                    </button>
-                    <button
-                      className="filter-pill"
-                      style={{ fontSize: 10 }}
-                      disabled={isPending || !approvalReason.trim()}
-                      onClick={handleRejectCurrentTask}
-                    >
-                      Reject
-                    </button>
-                    <button
-                      className="filter-pill"
-                      style={{ fontSize: 10 }}
-                      disabled={isPending || !approvalReason.trim()}
-                      onClick={handleRequestRevisionCurrentTask}
-                    >
-                      Request revision
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 16 }}>
-              <span className="detail-label" style={{ marginBottom: 10, display: 'block' }}>Deliverables</span>
-
-              <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
-                <label style={{ fontSize: 10, fontWeight: 800 }}>
-                  Title
-                  <input
-                    value={deliverableTitle}
-                    onChange={(e) => setDeliverableTitle(e.target.value)}
-                    placeholder="e.g. Q4 handover pack"
-                    style={{ width: '100%', marginTop: 6, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                    disabled={isPending}
-                  />
-                </label>
-                <label style={{ fontSize: 10, fontWeight: 800 }}>
-                  Description
-                  <textarea
-                    value={deliverableDescription}
-                    onChange={(e) => setDeliverableDescription(e.target.value)}
-                    placeholder="Define what “done” looks like."
-                    style={{ width: '100%', marginTop: 6, minHeight: 70, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                    disabled={isPending}
-                  />
-                </label>
-
-                <button className="filter-pill selected" style={{ fontSize: 10, width: 'fit-content' }} disabled={isPending || !deliverableTitle.trim()} onClick={handleCreateDeliverable}>
-                  Create deliverable
-                </button>
-
-                {deliverableError && <p className="form-error" style={{ margin: 0 }}>{deliverableError}</p>}
-              </div>
-
-              {(selectedTask.deliverables ?? []).length === 0 ? (
-                <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>No deliverables yet</span>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {selectedTask.deliverables!.map((d) => (
-                    <div key={d.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                        <span className="filter-pill" style={{ fontSize: 10 }}>{d.status}</span>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 12, fontWeight: 900 }}>{d.title}</div>
-                          {d.description && <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 4 }}>{d.description}</div>}
-                          {d.evidenceUrl && <div style={{ fontSize: 11, marginTop: 4 }}>Evidence: <a href={d.evidenceUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'oklch(.55 .11 175)', fontWeight: 800, textDecoration: 'none' }}>{d.evidenceUrl}</a></div>}
-                        </div>
-                      </div>
-
-                      {d.status === 'draft' && (
-                        <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
-                          <label style={{ fontSize: 10, fontWeight: 800 }}>
-                            Evidence URL
-                            <input
-                              value={deliverableEvidenceById[d.id] ?? ''}
-                              onChange={(e) => setDeliverableEvidenceById((m) => ({ ...m, [d.id]: e.target.value }))}
-                              placeholder="https://..."
-                              style={{ width: '100%', marginTop: 6, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                              disabled={isPending}
-                            />
-                          </label>
-                          <label style={{ fontSize: 10, fontWeight: 800 }}>
-                            Submission notes
-                            <textarea
-                              value={deliverableNotesById[d.id] ?? ''}
-                              onChange={(e) => setDeliverableNotesById((m) => ({ ...m, [d.id]: e.target.value }))}
-                              placeholder="Add context for verification."
-                              style={{ width: '100%', marginTop: 6, minHeight: 60, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                              disabled={isPending}
-                            />
-                          </label>
-                          <button
-                            className="filter-pill selected"
-                            style={{ fontSize: 10, width: 'fit-content' }}
-                            disabled={isPending || !(deliverableEvidenceById[d.id] ?? '').trim()}
-                            onClick={() => handleSubmitDeliverable(d.id)}
-                          >
-                            Submit deliverable
-                          </button>
-                        </div>
-                      )}
-
-                      {(d.status === 'submitted' || d.status === 'verified') && (
-                        <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
-                          <label style={{ fontSize: 10, fontWeight: 800 }}>
-                            Decision note
-                            <textarea
-                              value={deliverableDecisionById[d.id] ?? ''}
-                              onChange={(e) => setDeliverableDecisionById((m) => ({ ...m, [d.id]: e.target.value }))}
-                              placeholder={d.status === 'submitted' ? 'Verification note (optional)…' : 'Approval/rejection note (required for rejection)…'}
-                              style={{ width: '100%', marginTop: 6, minHeight: 70, fontSize: 11, padding: '8px 10px', border: '1px solid var(--input)', borderRadius: 6, background: 'var(--background)' }}
-                              disabled={isPending}
-                            />
-                          </label>
-
-                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {d.status === 'submitted' && (
-                              <>
-                                <button
-                                  className="filter-pill selected"
-                                  style={{ fontSize: 10 }}
-                                  disabled={isPending}
-                                  onClick={() => handleVerifyDeliverable(d.id)}
-                                >
-                                  Verify
-                                </button>
-                                <button
-                                  className="filter-pill"
-                                  style={{ fontSize: 10 }}
-                                  disabled={isPending || !(deliverableDecisionById[d.id] ?? '').trim()}
-                                  onClick={() => handleRejectDeliverable(d.id)}
-                                >
-                                  Reject
-                                </button>
-                              </>
-                            )}
-
-                            {d.status === 'verified' && (
-                              <>
-                                <button
-                                  className="filter-pill selected"
-                                  style={{ fontSize: 10 }}
-                                  disabled={isPending}
-                                  onClick={() => handleApproveDeliverable(d.id)}
-                                >
-                                  Approve
-                                </button>
-                                <button
-                                  className="filter-pill"
-                                  style={{ fontSize: 10 }}
-                                  disabled={isPending || !(deliverableDecisionById[d.id] ?? '').trim()}
-                                  onClick={() => handleRejectDeliverable(d.id)}
-                                >
-                                  Reject
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {d.decisionReason && (
-                        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--foreground)' }}>
-                          Note: {d.decisionReason}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div style={{ borderTop: '1px solid var(--border)', marginTop: 16, paddingTop: 16 }}>
-              <span className="detail-label" style={{ marginBottom: 10, display: 'block' }}>Dependencies</span>
-
-              <div style={{ display: 'grid', gap: 10, marginBottom: 12 }}>
-                <div>
-                  <strong style={{ fontSize: 11 }}>Blocked by</strong>
-                  <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {(selectedTask.blockedByDependencies ?? []).length === 0 ? (
-                      <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>None</span>
-                    ) : (
-                      selectedTask.blockedByDependencies!.map((d) => (
-                        <span key={d.id} className="filter-pill" style={{ fontSize: 10 }}>
-                          {d.blockingTask.title}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div>
-                  <strong style={{ fontSize: 11 }}>Blocking</strong>
-                  <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {(selectedTask.blockingDependencies ?? []).length === 0 ? (
-                      <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>Doesn’t block others</span>
-                    ) : (
-                      selectedTask.blockingDependencies!.map((d) => (
-                        <span key={d.id} className="filter-pill" style={{ fontSize: 10 }}>
-                          {d.blockedTask.title}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                <label style={{ flex: '1 1 240px', fontSize: 10, fontWeight: 800 }}>
-                  Add dependency: wait for
-                  <select
-                    value={dependencyBlockingTaskId}
-                    onChange={(e) => setDependencyBlockingTaskId(e.target.value)}
-                    style={{ marginTop: 6, width: '100%' }}
-                    disabled={isPending}
-                  >
-                    <option value="" disabled>
-                      Select blocking task…
-                    </option>
-                    {tasks
-                      .filter((t) => t.id !== selectedTask.id)
-                      .map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.title}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-
-                <button
-                  className="filter-pill selected"
-                  style={{ fontSize: 10 }}
-                  disabled={isPending || !dependencyBlockingTaskId || dependencyBlockingTaskId === selectedTask.id}
-                  onClick={handleCreateDependency}
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <TaskDetailSheet
+          task={selectedTask}
+          people={activePeople}
+          departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+          otherTasks={tasks.filter((entry) => entry.id !== selectedTask.id).map((entry) => ({ id: entry.id, title: entry.title }))}
+          currentUserId={currentUserId}
+          canEdit={canEditSelected}
+          canProgress={canProgressSelected}
+          isPending={isPending}
+          detailsSaving={detailsSaving}
+          detailsError={detailsError}
+          detailsSaved={detailsSaved}
+          detailTab={detailTab}
+          onTabChange={setDetailTab}
+          onClose={() => setSelectedTask(null)}
+          onPatch={(patch) =>
+            setSelectedTask((current) => (current?.id === selectedTask.id ? { ...current, ...patch } : current))
+          }
+          onSave={handleSaveTaskDetails}
+          onStatusChange={(status) => handleStatusChange(selectedTask.id, status)}
+          onProgressCommit={(progress) => handleProgressChange(selectedTask.id, progress)}
+          commentText={commentText}
+          commentError={commentError}
+          onCommentText={(value) => { setCommentText(value); setCommentError(null) }}
+          onAddComment={() => handleAddComment(selectedTask.id)}
+          onDeleteComment={handleDeleteComment}
+          attachLabel={attachLabel}
+          attachUrl={attachUrl}
+          showAttachForm={showAttachForm}
+          attachError={attachError}
+          onAttachLabel={setAttachLabel}
+          onAttachUrl={setAttachUrl}
+          onShowAttachForm={setShowAttachForm}
+          onPersistAttachment={(file) =>
+            persistAttachment(selectedTask.id, {
+              label: file.label,
+              url: file.url,
+              publicId: file.publicId,
+              bytes: file.bytes,
+              mimeType: file.mimeType,
+              originalName: file.originalName,
+            })
+          }
+          onAddLink={() => handleAddAttachment(selectedTask.id)}
+          deletingAttachmentId={deletingAttachmentId}
+          onDeleteAttachment={handleDeleteAttachment}
+          approvalReason={approvalReason}
+          approvalError={approvalError}
+          onApprovalReason={setApprovalReason}
+          onApprove={handleApproveCurrentTask}
+          onReject={handleRejectCurrentTask}
+          onRequestRevision={handleRequestRevisionCurrentTask}
+          deliverableTitle={deliverableTitle}
+          deliverableDescription={deliverableDescription}
+          deliverableError={deliverableError}
+          onDeliverableTitle={setDeliverableTitle}
+          onDeliverableDescription={setDeliverableDescription}
+          onCreateDeliverable={handleCreateDeliverable}
+          deliverableEvidenceById={deliverableEvidenceById}
+          deliverableEvidenceMetaById={deliverableEvidenceMetaById}
+          deliverableNotesById={deliverableNotesById}
+          deliverableDecisionById={deliverableDecisionById}
+          setDeliverableEvidenceById={setDeliverableEvidenceById}
+          setDeliverableEvidenceMetaById={setDeliverableEvidenceMetaById}
+          setDeliverableNotesById={setDeliverableNotesById}
+          setDeliverableDecisionById={setDeliverableDecisionById}
+          onCreateDeliverableSubmit={handleSubmitDeliverable}
+          onVerifyDeliverable={handleVerifyDeliverable}
+          onApproveDeliverable={handleApproveDeliverable}
+          onRejectDeliverable={handleRejectDeliverable}
+          dependencyBlockingTaskId={dependencyBlockingTaskId}
+          onDependencyBlockingTaskId={setDependencyBlockingTaskId}
+          onCreateDependency={handleCreateDependency}
+        />
       )}
 
       {canCreateWork && showCreate && (

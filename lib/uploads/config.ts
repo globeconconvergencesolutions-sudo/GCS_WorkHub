@@ -1,0 +1,58 @@
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+export const ALLOWED_UPLOAD_MIME_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'text/plain',
+  'text/csv',
+] as const
+
+export type UploadKind = 'task_attachment' | 'deliverable_evidence'
+
+const MIME_BY_EXTENSION: Record<string, (typeof ALLOWED_UPLOAD_MIME_TYPES)[number]> = {
+  pdf: 'application/pdf',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  csv: 'text/csv',
+}
+
+export function isAllowedUploadMime(mimeType: string) {
+  return (ALLOWED_UPLOAD_MIME_TYPES as readonly string[]).includes(mimeType)
+}
+
+export function resolveUploadMime(mimeType: string, fileName: string) {
+  if (isAllowedUploadMime(mimeType)) return mimeType
+  const extension = fileName.split('.').pop()?.toLowerCase()
+  if (!extension) return null
+  return MIME_BY_EXTENSION[extension] ?? null
+}
+
+export function getUploadRootFolder() {
+  const folder = process.env.CLOUDINARY_ROOT_FOLDER?.trim()
+  return folder && folder.length > 0 ? folder.replace(/^\/+|\/+$/g, '') : 'gcs-workhub'
+}
+
+export function getUploadFolder(kind: UploadKind, entityId: string) {
+  const root = getUploadRootFolder()
+  if (kind === 'deliverable_evidence') return `${root}/deliverables/${entityId}`
+  return `${root}/tasks/${entityId}`
+}

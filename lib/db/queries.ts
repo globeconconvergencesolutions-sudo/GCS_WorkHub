@@ -99,8 +99,8 @@ export async function listTasks(options?: { assigneeId?: string; departmentId?: 
     with: {
       assignee: true,
       department: true,
-      comments: true,
-      attachments: true,
+      comments: { with: { user: true } },
+      attachments: { with: { user: true } },
       approvals: { with: { requestor: true, approver: true } },
       deliverables: true,
       blockingDependencies: { with: { blockedTask: true } },

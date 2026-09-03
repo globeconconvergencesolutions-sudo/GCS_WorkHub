@@ -8,12 +8,14 @@ export function CategoryField({
   onChange,
   hint = '',
   showLabel = true,
+  disabled = false,
 }: {
   value: string
   customValue: string
   onChange: (category: string, custom: string) => void
   hint?: string
   showLabel?: boolean
+  disabled?: boolean
 }) {
   const isOther = value === 'other'
 
@@ -25,6 +27,7 @@ export function CategoryField({
           name="category"
           value={value}
           onChange={(event) => onChange(event.target.value, event.target.value === 'other' ? customValue : '')}
+          disabled={disabled}
         >
           {Object.entries(TASK_CATEGORY_LABELS).map(([option, label]) => (
             <option key={option} value={option}>
@@ -42,6 +45,7 @@ export function CategoryField({
             onChange={(event) => onChange('other', event.target.value)}
             placeholder="e.g. Legal review, facilities, board prep"
             required
+            disabled={disabled}
             autoFocus
           />
         </label>

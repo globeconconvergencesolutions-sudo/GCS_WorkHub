@@ -62,6 +62,7 @@ import type {
 } from '@/lib/db/schema'
 import { resolveCategoryInput } from '@/lib/category'
 import { statusLabel } from '@/lib/format'
+import { destroyCloudinaryAsset, isOurCloudinaryUrl } from '@/lib/uploads/cloudinary'
 
 function refreshWorkhub() {
   revalidatePath('/')
@@ -731,11 +732,14 @@ export async function addComment(taskId: string, body: string) {
   if (!task) return { error: 'Task not found.' }
   if (!canProgressTask(currentUser, task)) return denied('You are not allowed to comment on this task.')
 
-  await getDb().insert(taskComments).values({
-    taskId,
-    userId: currentUser.id,
-    body: trimmed,
-  })
+  const [comment] = await getDb()
+    .insert(taskComments)
+    .values({
+      taskId,
+      userId: currentUser.id,
+      body: trimmed,
+    })
+    .returning()
 
   await getDb().insert(activityEvents).values({
     companyId: task.companyId,
@@ -747,7 +751,35 @@ export async function addComment(taskId: string, body: string) {
   })
 
   refreshWorkhub()
-  return { ok: true }
+  return {
+    ok: true as const,
+    comment: {
+      ...comment,
+      user: {
+        initials: currentUser.initials,
+        firstName: currentUser.firstName,
+        lastName: currentUser.lastName,
+      },
+    },
+  }
+}
+
+export async function deleteComment(commentId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [comment] = await getDb().select().from(taskComments).where(eq(taskComments.id, commentId)).limit(1)
+  if (!comment) return { error: 'Comment not found.' }
+
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, comment.taskId)).limit(1)
+  if (!task) return { error: 'Task not found.' }
+  if (comment.userId !== currentUser.id && !canEditTask(currentUser, task)) {
+    return denied('You can only remove your own comments.')
+  }
+
+  await getDb().delete(taskComments).where(eq(taskComments.id, commentId))
+  refreshWorkhub()
+  return { ok: true as const }
 }
 
 export async function updateTaskDetails(input: {
@@ -836,34 +868,83 @@ export async function updateTaskDetails(input: {
   return { ok: true }
 }
 
-export async function addAttachment(taskId: string, label: string, url: string) {
-  if (!label.trim() || !url.trim()) return { error: 'Label and URL are required.' }
+export async function addAttachment(input: {
+  taskId: string
+  label: string
+  url: string
+  publicId?: string | null
+  bytes?: number | null
+  mimeType?: string | null
+  originalName?: string | null
+}) {
+  const label = input.label.trim()
+  const url = input.url.trim()
+  if (!label || !url) return { error: 'A file or document link is required.' }
+  if (!isSafeAttachmentUrl(url)) return { error: 'Use an https link, or upload a file from this device.' }
 
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' }
 
-  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1)
   if (!task) return { error: 'Task not found.' }
   if (!canProgressTask(currentUser, task)) return denied('You are not allowed to attach files to this task.')
 
-  await getDb().insert(taskAttachments).values({
-    taskId,
-    userId: currentUser.id,
-    label: label.trim(),
-    url: url.trim(),
-  })
+  const [attachment] = await getDb()
+    .insert(taskAttachments)
+    .values({
+      taskId: input.taskId,
+      userId: currentUser.id,
+      label,
+      url,
+      publicId: input.publicId?.trim() || null,
+      bytes: input.bytes ?? null,
+      mimeType: input.mimeType?.trim() || null,
+      originalName: input.originalName?.trim() || null,
+    })
+    .returning()
 
   await getDb().insert(activityEvents).values({
     companyId: task.companyId,
     actorId: currentUser.id,
     entityType: 'task',
-    entityId: taskId,
+    entityId: input.taskId,
     action: 'attached',
-    summary: `attached ${label.trim()} to ${task.title}`,
+    summary: `attached ${label} to ${task.title}`,
   })
 
   refreshWorkhub()
-  return { ok: true }
+  return { ok: true as const, attachment }
+}
+
+export async function deleteAttachment(attachmentId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [attachment] = await getDb().select().from(taskAttachments).where(eq(taskAttachments.id, attachmentId)).limit(1)
+  if (!attachment) return { error: 'Attachment not found.' }
+
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, attachment.taskId)).limit(1)
+  if (!task) return { error: 'Task not found.' }
+  const mayDelete = attachment.userId === currentUser.id || canEditTask(currentUser, task)
+  if (!mayDelete) return denied('You are not allowed to remove this attachment.')
+
+  if (attachment.publicId) {
+    await destroyCloudinaryAsset(attachment.publicId)
+  }
+
+  await getDb().delete(taskAttachments).where(eq(taskAttachments.id, attachmentId))
+  refreshWorkhub()
+  return { ok: true as const }
+}
+
+function isSafeAttachmentUrl(url: string) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:') return false
+    return isOurCloudinaryUrl(url) || parsed.hostname.length > 0
+  } catch {
+    return false
+  }
 }
 
 export async function updateTaskProgress(taskId: string, progress: number) {
@@ -1210,12 +1291,21 @@ export async function submitDeliverable(
   deliverableId: string,
   evidenceUrl: string,
   notes: string,
+  evidence?: {
+    publicId?: string | null
+    bytes?: number | null
+    mimeType?: string | null
+    originalName?: string | null
+  },
 ) {
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' }
 
   const trimmedEvidenceUrl = evidenceUrl.trim()
-  if (!trimmedEvidenceUrl) return { error: 'Evidence URL is required.' }
+  if (!trimmedEvidenceUrl) return { error: 'Upload evidence or paste an https link before submitting.' }
+  if (!isSafeAttachmentUrl(trimmedEvidenceUrl)) {
+    return { error: 'Evidence must be an uploaded file or an https link.' }
+  }
 
   const [deliverable] = await getDb()
     .select()
@@ -1234,6 +1324,10 @@ export async function submitDeliverable(
     .set({
       status: 'submitted',
       evidenceUrl: trimmedEvidenceUrl,
+      evidencePublicId: evidence?.publicId?.trim() || null,
+      evidenceBytes: evidence?.bytes ?? null,
+      evidenceMimeType: evidence?.mimeType?.trim() || null,
+      evidenceOriginalName: evidence?.originalName?.trim() || null,
       submissionNotes: notes.trim() || null,
       submittedById: currentUser.id,
       submittedAt: new Date(),

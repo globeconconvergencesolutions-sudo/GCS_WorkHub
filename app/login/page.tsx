@@ -76,7 +76,7 @@ export default async function LoginPage({
           </div>
 
           <p className="mt-6 text-center text-xs text-slate-600">
-            © {new Date().getFullYear()} GCS WorkHub. All rights reserved.
+            © 2026 GCS WorkHub. All rights reserved.
           </p>
         </div>
       </section>
