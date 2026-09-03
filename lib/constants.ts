@@ -42,4 +42,5 @@ export const ACTIVE_TASK_STATUSES = [
 
 export const ATTENTION_STATUSES = ['blocked', 'pending_approval'] as const
 
-export const USER_COOKIE = 'gcs_workhub_user'
+export const AVATAR_COLORS = ['teal', 'navy', 'gold', 'coral'] as const
+export type AvatarColor = (typeof AVATAR_COLORS)[number]

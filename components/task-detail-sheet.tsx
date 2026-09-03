@@ -7,6 +7,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CategoryField } from '@/components/category-field'
 import { StatusBadge } from '@/components/status-badge'
 import { FileDropzone, AttachmentRow } from '@/components/uploads/file-dropzone'
+import { UserAvatar } from '@/components/user-avatar'
 import { TASK_PRIORITY_LABELS, TASK_STATUS_LABELS } from '@/lib/constants'
 import { taskCategoryEnum, taskStatusEnum } from '@/lib/db/schema'
 import { categoryLabel, formatDue, formatRelative, fullName, toDateInputValue } from '@/lib/format'
@@ -31,14 +32,14 @@ type DetailTask = {
   assigneeId?: string | null
   dueDate: string | Date | null
   startDate?: string | Date | null
-  assignee: { initials: string; firstName: string; lastName: string } | null
+  assignee: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   department: { id?: string; name: string; color?: string } | null
   comments?: Array<{
     id: string
     body: string
     createdAt: string | Date
     userId?: string | null
-    user: { initials: string; firstName: string; lastName: string } | null
+    user: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   }>
   attachments?: Array<{
     id: string
@@ -52,7 +53,7 @@ type DetailTask = {
     id: string
     status: string
     decisionReason: string | null
-    approver?: { initials: string; firstName: string; lastName: string } | null
+    approver?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   }>
   deliverables?: Array<{
     id: string
@@ -77,14 +78,10 @@ type TaskPatch = {
   assigneeId?: string | null
   dueDate?: string | Date | null
   startDate?: string | Date | null
-  assignee?: { initials: string; firstName: string; lastName: string } | null
+  assignee?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
 }
 
 type DepartmentOption = { id: string; name: string }
-
-function Avatar({ initials }: { initials: string }) {
-  return <span className="avatar avatar-small">{initials}</span>
-}
 
 function personDepartmentId(person: Person) {
   return person.departmentId ?? ''
@@ -505,7 +502,12 @@ export function TaskDetailSheet({
                 <div className="td-comments">
                   {task.comments!.map((comment) => (
                     <div key={comment.id} className="td-comment">
-                      <Avatar initials={comment.user?.initials ?? 'G'} />
+                      <UserAvatar
+                        initials={comment.user?.initials ?? 'G'}
+                        url={comment.user?.avatarUrl}
+                        color={comment.user?.avatarColor}
+                        size="sm"
+                      />
                       <div>
                         <strong>{comment.user ? fullName(comment.user) : 'System'}</strong>
                         {((comment.userId ?? null) === currentUserId || canEdit) ? (

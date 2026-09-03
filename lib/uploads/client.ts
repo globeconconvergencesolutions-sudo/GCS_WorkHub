@@ -1,4 +1,4 @@
-import { MAX_UPLOAD_BYTES, resolveUploadMime, type UploadKind } from '@/lib/uploads/config'
+import { getUploadLimits, resolveUploadMime, type UploadKind } from '@/lib/uploads/config'
 
 export type UploadedFile = {
   url: string
@@ -10,12 +10,17 @@ export type UploadedFile = {
 }
 
 export async function uploadWorkspaceFile(file: File, kind: UploadKind, entityId: string): Promise<UploadedFile> {
-  if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error('Files must be 25 MB or smaller.')
+  const limits = getUploadLimits(kind)
+  if (file.size > limits.maxBytes) {
+    throw new Error(kind === 'user_avatar' ? 'Photos must be 5 MB or smaller.' : 'Files must be 25 MB or smaller.')
   }
   const mimeType = resolveUploadMime(file.type, file.name)
-  if (!mimeType) {
-    throw new Error('That file type is not allowed. Use PDF, Office, image, CSV, or text files.')
+  if (!mimeType || !limits.mimeTypes.includes(mimeType)) {
+    throw new Error(
+      kind === 'user_avatar'
+        ? 'Use a JPG, PNG, WebP, or GIF photo.'
+        : 'That file type is not allowed. Use PDF, Office, image, CSV, or text files.',
+    )
   }
 
   const signResponse = await fetch('/api/uploads/sign', {

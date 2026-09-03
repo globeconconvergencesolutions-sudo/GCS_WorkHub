@@ -27,6 +27,7 @@ import {
   X,
 } from 'lucide-react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { StatusBadge } from '@/components/status-badge'
@@ -38,6 +39,7 @@ import { InviteEmployeeDialog } from '@/components/invite-employee-dialog'
 import { OrgSettingsPanel } from '@/components/org-settings-panel'
 import { ProjectWorkspace } from '@/components/project-workspace'
 import { WorkhubShell, useCollapsedSidebar } from '@/components/workhub-shell'
+import { UserAvatar } from '@/components/user-avatar'
 import {
   TASK_PRIORITY_LABELS,
   TASK_STATUS_LABELS,
@@ -103,7 +105,7 @@ type DbComment = {
   body: string
   createdAt: string | Date
   userId?: string | null
-  user: { initials: string; firstName: string; lastName: string } | null
+  user: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
 }
 
 type DbAttachment = {
@@ -130,7 +132,7 @@ type DbTask = {
   assigneeId?: string | null
   dueDate: string | Date | null
   startDate?: string | Date | null
-  assignee: { initials: string; firstName: string; lastName: string } | null
+  assignee: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   department: { id?: string; name: string; color?: string } | null
   comments?: DbComment[]
   attachments?: DbAttachment[]
@@ -139,8 +141,8 @@ type DbTask = {
     status: string
     decisionReason: string | null
     createdAt: string | Date
-    requestor?: { initials: string; firstName: string; lastName: string } | null
-    approver?: { initials: string; firstName: string; lastName: string } | null
+    requestor?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
+    approver?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   }>
   deliverables?: Array<{
     id: string
@@ -341,7 +343,7 @@ type DbResponsibility = {
   title: string
   category: string
   status: string
-  owner: { id?: string; initials: string; firstName: string; lastName: string }
+  owner: { id?: string; initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null }
   department?: { name: string } | null
 }
 
@@ -350,7 +352,7 @@ type DbActivityEvent = {
   action: string
   summary: string
   createdAt: string | Date
-  actor?: { initials: string; firstName: string; lastName: string } | null
+  actor?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
 }
 
 type DbProject = {
@@ -378,7 +380,7 @@ type DbProject = {
     id: string
     summary: string
     createdAt: string | Date
-    actor?: { initials: string; firstName: string; lastName: string } | null
+    actor?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
   }>
   milestones?: Array<{
     id: string
@@ -389,7 +391,7 @@ type DbProject = {
     progress: number
     taskIds: string[]
   }>
-  team?: Array<{ id: string; firstName: string; lastName: string; initials: string }>
+  team?: Array<{ id: string; firstName: string; lastName: string; initials: string; avatarUrl?: string | null; avatarColor?: string | null }>
 }
 
 type DbNotification = {
@@ -438,10 +440,6 @@ type Employee = Person & {
   department?: { id?: string; name: string } | null
   manager?: { firstName: string; lastName: string } | null
   status?: string
-}
-
-function Avatar({ initials, tone = '' }: { initials: string; tone?: string }) {
-  return <span className={`avatar ${tone}`}>{initials}</span>
 }
 
 export default function WorkhubDashboardDB({
@@ -818,7 +816,15 @@ export default function WorkhubDashboardDB({
         body,
         createdAt: new Date().toISOString(),
         userId: currentUserId,
-        user: currentUser ? { initials: currentUser.initials, firstName: currentUser.firstName, lastName: currentUser.lastName } : null,
+        user: currentUser
+          ? {
+              initials: currentUser.initials,
+              firstName: currentUser.firstName,
+              lastName: currentUser.lastName,
+              avatarUrl: currentUser.avatarUrl,
+              avatarColor: currentUser.avatarColor,
+            }
+          : null,
       }
       setSelectedTask((current) => current?.id === taskId ? { ...current, comments: [...(current.comments ?? []), newComment] } : current)
       setCommentText('')
@@ -1292,6 +1298,8 @@ export default function WorkhubDashboardDB({
                     initials: currentUser.initials,
                     firstName: currentUser.firstName,
                     lastName: currentUser.lastName,
+                    avatarUrl: currentUser.avatarUrl,
+                    avatarColor: currentUser.avatarColor,
                   },
                 }
               : item,
@@ -1442,7 +1450,12 @@ export default function WorkhubDashboardDB({
             <div className="task-owner">
               {task.assignee && (
                 <>
-                  <Avatar initials={task.assignee.initials} tone="avatar-small" />
+                  <UserAvatar
+                    initials={task.assignee.initials}
+                    url={task.assignee.avatarUrl}
+                    color={task.assignee.avatarColor}
+                    size="sm"
+                  />
                   <span>{fullName(task.assignee)}</span>
                 </>
               )}
@@ -1543,6 +1556,19 @@ export default function WorkhubDashboardDB({
         hint: 'Workspace view',
         onSelect: () => nav(item.label),
       })),
+    ...(!commandQuery || 'profile'.includes(commandQuery)
+      ? [
+          {
+            id: 'view-Profile',
+            label: 'Profile',
+            hint: 'Your account',
+            onSelect: () => {
+              setCommandOpen(false)
+              router.push('/profile')
+            },
+          },
+        ]
+      : []),
     ...(commandQuery
       ? [
           ...tasks
@@ -1695,6 +1721,9 @@ export default function WorkhubDashboardDB({
             <small>
               {currentUserRoles.map((role) => role.replaceAll('_', ' ')).join(' · ') || 'Employee'}
             </small>
+            <Link href="/profile" className="profile-page-link">
+              Open profile
+            </Link>
             <form
               className="notification-preferences"
               action={async (formData) => {
@@ -1736,8 +1765,16 @@ export default function WorkhubDashboardDB({
       currentName={currentUser ? fullName(currentUser) : 'Workspace user'}
       currentTitle={currentUser?.jobTitle ?? 'Employee'}
       currentInitials={currentUser?.initials ?? 'G'}
+      currentAvatarUrl={currentUser?.avatarUrl}
+      currentAvatarColor={currentUser?.avatarColor}
       companyName={companyName}
       breadcrumb={activeNav}
+      profileNavActive={false}
+      onOpenProfile={() => {
+        setMobileOpen(false)
+        setShowProfile(false)
+        router.push('/profile')
+      }}
     >
         <div className="page-wrap">
           {activeNav === 'Home' && (
@@ -2050,7 +2087,12 @@ export default function WorkhubDashboardDB({
                         <span>{categoryLabel(item.category)}{item.department ? ` · ${item.department.name}` : ''}</span>
                       </div>
                       <div className="responsibility-owner">
-                        <Avatar initials={item.owner.initials} tone="avatar-small" />
+                        <UserAvatar
+                          initials={item.owner.initials}
+                          url={item.owner.avatarUrl}
+                          color={item.owner.avatarColor}
+                          size="sm"
+                        />
                         {fullName(item.owner)}
                       </div>
                       <StatusBadge status={item.status === 'active' ? 'Active' : item.status} />
@@ -2138,7 +2180,11 @@ export default function WorkhubDashboardDB({
                     )
                     .map((employee) => (
                     <div className="employee-row" key={employee.id}>
-                      <Avatar initials={employee.initials} tone="avatar-teal" />
+                      <UserAvatar
+                        initials={employee.initials}
+                        url={employee.avatarUrl}
+                        color={employee.avatarColor}
+                      />
                       <div className="employee-main">
                         <strong>{fullName(employee)}</strong>
                         <span>{employee.jobTitle}</span>
@@ -2442,7 +2488,7 @@ export default function WorkhubDashboardDB({
               )}
               <section className="panel" style={{ marginTop: 18 }}>
                 <div className="panel-heading">
-                  <div><h2>Your alert preferences</h2><p>These also live in your profile menu</p></div>
+                    <div><h2>Your alert preferences</h2><p>These also live on your profile page and in the profile menu</p></div>
                 </div>
                 <form
                   className="notification-preferences settings-preferences"
@@ -2794,7 +2840,12 @@ function ActivityPanel({ events, full = false }: { events: DbActivityEvent[]; fu
       <div className="activity-list">
         {events.map((event) => (
           <div className="activity-row" key={event.id}>
-            <Avatar initials={event.actor?.initials ?? 'G'} tone="avatar-teal" />
+            <UserAvatar
+              initials={event.actor?.initials ?? 'G'}
+              url={event.actor?.avatarUrl}
+              color={event.actor?.avatarColor}
+              size="sm"
+            />
             <div>
               <strong>
                 {event.actor ? fullName(event.actor) : 'Workspace'} <span>{event.action}</span>

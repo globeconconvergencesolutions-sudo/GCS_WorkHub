@@ -1,4 +1,5 @@
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+export const MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
 export const ALLOWED_UPLOAD_MIME_TYPES = [
   'application/pdf',
@@ -16,7 +17,9 @@ export const ALLOWED_UPLOAD_MIME_TYPES = [
   'text/csv',
 ] as const
 
-export type UploadKind = 'task_attachment' | 'deliverable_evidence'
+export const AVATAR_UPLOAD_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const
+
+export type UploadKind = 'task_attachment' | 'deliverable_evidence' | 'user_avatar'
 
 const MIME_BY_EXTENSION: Record<string, (typeof ALLOWED_UPLOAD_MIME_TYPES)[number]> = {
   pdf: 'application/pdf',
@@ -54,5 +57,23 @@ export function getUploadRootFolder() {
 export function getUploadFolder(kind: UploadKind, entityId: string) {
   const root = getUploadRootFolder()
   if (kind === 'deliverable_evidence') return `${root}/deliverables/${entityId}`
+  if (kind === 'user_avatar') return `${root}/avatars/${entityId}`
   return `${root}/tasks/${entityId}`
+}
+
+export function getUploadLimits(kind: UploadKind) {
+  if (kind === 'user_avatar') {
+    return {
+      maxBytes: MAX_AVATAR_BYTES,
+      mimeTypes: AVATAR_UPLOAD_MIME_TYPES as readonly string[],
+      accept: 'image/jpeg,image/png,image/webp,image/gif,.jpg,.jpeg,.png,.webp,.gif',
+      hint: 'JPG, PNG, WebP, or GIF · up to 5 MB',
+    }
+  }
+  return {
+    maxBytes: MAX_UPLOAD_BYTES,
+    mimeTypes: ALLOWED_UPLOAD_MIME_TYPES as readonly string[],
+    accept: '.pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv',
+    hint: 'PDF, Office, images, CSV, or text · up to 25 MB',
+  }
 }

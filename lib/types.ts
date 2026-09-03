@@ -1,6 +1,9 @@
 import type { users } from '@/lib/db/schema'
 
-export type Person = Pick<typeof users.$inferSelect, 'id' | 'firstName' | 'lastName' | 'jobTitle' | 'initials' | 'avatarColor' | 'departmentId'>
+export type Person = Pick<
+  typeof users.$inferSelect,
+  'id' | 'firstName' | 'lastName' | 'jobTitle' | 'initials' | 'avatarColor' | 'avatarUrl' | 'departmentId'
+>
 
 export type CompanySummary = {
   id: string

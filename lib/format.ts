@@ -73,6 +73,13 @@ export function fullName(user: { firstName: string; lastName: string }) {
   return `${user.firstName} ${user.lastName}`
 }
 
+export function makeInitials(firstName: string, lastName: string) {
+  const first = firstName.trim().charAt(0)
+  const last = lastName.trim().charAt(0)
+  const initials = `${first}${last}`.toUpperCase()
+  return initials || 'G'
+}
+
 export function statusLabel(status: (typeof taskStatusEnum.enumValues)[number]) {
   return TASK_STATUS_LABELS[status]
 }

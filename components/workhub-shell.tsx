@@ -13,12 +13,14 @@ import {
 import {
   Bell,
   ChevronDown,
+  CircleUser,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
   X,
 } from 'lucide-react'
+import { UserAvatar } from '@/components/user-avatar'
 import type { WorkspaceView } from '@/lib/workspace-nav'
 
 type NavItem = {
@@ -73,8 +75,12 @@ export function WorkhubShell({
   currentName,
   currentTitle,
   currentInitials,
+  currentAvatarUrl,
+  currentAvatarColor,
   companyName,
   breadcrumb,
+  profileNavActive = false,
+  onOpenProfile,
   children,
 }: {
   collapsed: boolean
@@ -83,7 +89,7 @@ export function WorkhubShell({
   onMobileOpen: () => void
   onMobileClose: () => void
   navItems: NavItem[]
-  activeNav: WorkspaceView
+  activeNav: WorkspaceView | null
   onNavigate: (view: WorkspaceView) => void
   searchQuery: string
   onSearchChange: (value: string) => void
@@ -102,8 +108,12 @@ export function WorkhubShell({
   currentName: string
   currentTitle: string
   currentInitials: string
+  currentAvatarUrl?: string | null
+  currentAvatarColor?: string | null
   companyName: string
   breadcrumb: string
+  profileNavActive?: boolean
+  onOpenProfile?: () => void
   children: ReactNode
 }) {
   const groups = useMemo(() => {
@@ -239,6 +249,22 @@ export function WorkhubShell({
           </div>
           <nav className="primary-nav">{renderNav(onNavigate)}</nav>
           <div className="sidebar-bottom">
+            {onOpenProfile ? (
+              <button
+                type="button"
+                className={profileNavActive ? 'nav-item active' : 'nav-item'}
+                data-label="Profile"
+                title="Profile"
+                aria-current={profileNavActive ? 'page' : undefined}
+                onClick={() => {
+                  setPeek(false)
+                  onOpenProfile()
+                }}
+              >
+                <CircleUser aria-hidden={true} />
+                <span>Profile</span>
+              </button>
+            ) : null}
             <button
               type="button"
               className="sidebar-toggle"
@@ -275,6 +301,22 @@ export function WorkhubShell({
               </button>
             </div>
             <nav className="primary-nav">{renderNav(onNavigate)}</nav>
+            {onOpenProfile ? (
+              <div className="sidebar-bottom mobile-profile-nav">
+                <button
+                  type="button"
+                  className={profileNavActive ? 'nav-item active' : 'nav-item'}
+                  aria-current={profileNavActive ? 'page' : undefined}
+                  onClick={() => {
+                    onMobileClose()
+                    onOpenProfile()
+                  }}
+                >
+                  <CircleUser aria-hidden={true} />
+                  <span>Profile</span>
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -305,7 +347,7 @@ export function WorkhubShell({
               {unreadCount > 0 && <i aria-hidden="true">{unreadCount > 9 ? '9+' : unreadCount}</i>}
             </button>
             <button className="profile-button" type="button" onClick={onToggleProfile}>
-              <span className="avatar avatar-navy">{currentInitials}</span>
+              <UserAvatar initials={currentInitials} url={currentAvatarUrl} color={currentAvatarColor} />
               <span className="profile-copy">
                 <strong>{currentName}</strong>
                 <small>{currentTitle}</small>

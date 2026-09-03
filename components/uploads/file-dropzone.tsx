@@ -3,21 +3,26 @@
 import { useRef, useState } from 'react'
 import { Loader2, Paperclip, Upload } from 'lucide-react'
 import { uploadWorkspaceFile, type UploadedFile } from '@/lib/uploads/client'
-import type { UploadKind } from '@/lib/uploads/config'
+import { getUploadLimits, type UploadKind } from '@/lib/uploads/config'
 
 export function FileDropzone({
   kind,
   entityId,
   disabled,
   label = 'Upload a file',
+  accept,
+  hint,
   onUploaded,
 }: {
   kind: UploadKind
   entityId: string
   disabled?: boolean
   label?: string
+  accept?: string
+  hint?: string
   onUploaded: (file: UploadedFile) => void | Promise<void>
 }) {
+  const limits = getUploadLimits(kind)
   const inputRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -58,12 +63,12 @@ export function FileDropzone({
           ref={inputRef}
           type="file"
           disabled={disabled || busy}
-          accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv"
+          accept={accept ?? limits.accept}
           onChange={(event) => void handleFiles(event.target.files)}
         />
         {busy ? <Loader2 className="file-dropzone-icon spin" aria-hidden="true" /> : <Upload className="file-dropzone-icon" aria-hidden="true" />}
         <strong>{busy ? 'Uploading…' : label}</strong>
-        <span>PDF, Office, images, CSV, or text · up to 25 MB</span>
+        <span>{hint ?? limits.hint}</span>
       </label>
       {error ? (
         <p className="form-error" role="alert">

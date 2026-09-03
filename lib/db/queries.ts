@@ -381,6 +381,8 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
               initials: event.actor.initials,
               firstName: event.actor.firstName,
               lastName: event.actor.lastName,
+              avatarUrl: event.actor.avatarUrl,
+              avatarColor: event.actor.avatarColor,
             }
           : null,
       }))
@@ -421,6 +423,8 @@ export async function listProjects(options?: { limit?: number; viewer?: CurrentU
         firstName: entry.user.firstName,
         lastName: entry.user.lastName,
         initials: entry.user.initials,
+        avatarUrl: entry.user.avatarUrl,
+        avatarColor: entry.user.avatarColor,
       })),
     }
   })

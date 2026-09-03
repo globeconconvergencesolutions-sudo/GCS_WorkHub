@@ -1,6 +1,6 @@
 'use server'
 
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import bcrypt from 'bcryptjs'
 import {
@@ -29,6 +29,7 @@ import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
 import { tasksToCsv } from '@/lib/reporting/build-report'
 import {
+  authUser,
   activityEvents,
   departments,
   deliverables,
@@ -62,11 +63,13 @@ import type {
   managementRequestStatusEnum,
 } from '@/lib/db/schema'
 import { resolveCategoryInput } from '@/lib/category'
-import { statusLabel } from '@/lib/format'
+import { AVATAR_COLORS } from '@/lib/constants'
+import { fullName, makeInitials, statusLabel } from '@/lib/format'
 import { destroyCloudinaryAsset, isOurCloudinaryUrl, purgeCloudinaryPublicIds } from '@/lib/uploads/cloudinary'
 
 function refreshWorkhub() {
   revalidatePath('/')
+  revalidatePath('/profile')
 }
 
 function slugify(value: string) {
@@ -760,6 +763,8 @@ export async function addComment(taskId: string, body: string) {
         initials: currentUser.initials,
         firstName: currentUser.firstName,
         lastName: currentUser.lastName,
+        avatarUrl: currentUser.avatarUrl,
+        avatarColor: currentUser.avatarColor,
       },
     },
   }
@@ -1881,6 +1886,161 @@ export async function updateNotificationPreferences(formData: FormData) {
 
   refreshWorkhub()
   return { ok: true }
+}
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+export async function updateOwnProfile(input: {
+  firstName: string
+  lastName: string
+  jobTitle: string
+  email: string
+  avatarColor: string
+}) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const firstName = input.firstName.trim()
+  const lastName = input.lastName.trim()
+  const jobTitle = input.jobTitle.trim()
+  const email = input.email.trim().toLowerCase()
+  const avatarColor = AVATAR_COLORS.includes(input.avatarColor as (typeof AVATAR_COLORS)[number])
+    ? input.avatarColor
+    : currentUser.avatarColor
+
+  if (!firstName || !lastName) return { error: 'First and last name are required.' }
+  if (!jobTitle) return { error: 'A job title is required.' }
+  if (!EMAIL_PATTERN.test(email)) return { error: 'Enter a valid work email.' }
+
+  if (email !== currentUser.email) {
+    const taken = await getDb()
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.email, email), ne(users.id, currentUser.id)))
+      .limit(1)
+    if (taken.length > 0) return { error: 'That email is already used in this workspace.' }
+
+    const authTaken = await getDb()
+      .select({ id: authUser.id })
+      .from(authUser)
+      .where(and(eq(authUser.email, email), ne(authUser.id, currentUser.id)))
+      .limit(1)
+    if (authTaken.length > 0) return { error: 'That email is already used in this workspace.' }
+  }
+
+  const initials = makeInitials(firstName, lastName)
+  await getDb()
+    .update(users)
+    .set({ firstName, lastName, jobTitle, email, initials, avatarColor })
+    .where(eq(users.id, currentUser.id))
+
+  await getDb()
+    .update(authUser)
+    .set({ name: `${firstName} ${lastName}`, email, updatedAt: new Date() })
+    .where(eq(authUser.id, currentUser.id))
+
+  await getDb().insert(activityEvents).values({
+    companyId: currentUser.companyId,
+    actorId: currentUser.id,
+    entityType: 'user',
+    entityId: currentUser.id,
+    action: 'profile_updated',
+    summary: 'updated their profile',
+  })
+
+  refreshWorkhub()
+  return { ok: true as const, initials }
+}
+
+export async function changeOwnPassword(input: {
+  currentPassword: string
+  nextPassword: string
+  confirmPassword: string
+}) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const currentPassword = input.currentPassword
+  const nextPassword = input.nextPassword
+  const confirmPassword = input.confirmPassword
+  if (!currentPassword || !nextPassword) return { error: 'Enter your current and new password.' }
+  if (nextPassword.length < 8) return { error: 'New password must be at least 8 characters.' }
+  if (nextPassword !== confirmPassword) return { error: 'New password and confirmation do not match.' }
+  if (!currentUser.passwordHash) return { error: 'This account cannot change a password from WorkHub.' }
+
+  const matches = await bcrypt.compare(currentPassword, currentUser.passwordHash)
+  if (!matches) return { error: 'Current password is incorrect.' }
+  const same = await bcrypt.compare(nextPassword, currentUser.passwordHash)
+  if (same) return { error: 'Choose a password that is different from the current one.' }
+
+  const passwordHash = await bcrypt.hash(nextPassword, 10)
+  await getDb().update(users).set({ passwordHash }).where(eq(users.id, currentUser.id))
+  await provisionAuthIdentity({
+    userId: currentUser.id,
+    email: currentUser.email,
+    name: fullName(currentUser),
+    passwordHash,
+  })
+
+  refreshWorkhub()
+  return { ok: true as const }
+}
+
+export async function setOwnAvatar(input: { url: string; publicId: string }) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const url = input.url.trim()
+  const publicId = input.publicId.trim()
+  if (!url || !publicId) return { error: 'The photo did not finish uploading.' }
+  if (!isOurCloudinaryUrl(url)) return { error: 'That photo is not stored in this workspace.' }
+
+  const previousPublicId = currentUser.avatarPublicId
+  try {
+    await getDb()
+      .update(users)
+      .set({ avatarUrl: url, avatarPublicId: publicId })
+      .where(eq(users.id, currentUser.id))
+    await getDb().update(authUser).set({ image: url, updatedAt: new Date() }).where(eq(authUser.id, currentUser.id))
+  } catch {
+    try {
+      await destroyCloudinaryAsset(publicId)
+    } catch {
+      // The new file may remain in Cloudinary; the profile was not changed.
+    }
+    return { error: 'The photo could not be saved. Nothing on your profile changed.' }
+  }
+
+  if (previousPublicId && previousPublicId !== publicId) {
+    try {
+      await destroyCloudinaryAsset(previousPublicId)
+    } catch {
+      // New photo is live. The previous file may remain in Cloudinary.
+    }
+  }
+
+  refreshWorkhub()
+  return { ok: true as const, avatarUrl: url }
+}
+
+export async function removeOwnAvatar() {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+  if (!currentUser.avatarUrl && !currentUser.avatarPublicId) return { ok: true as const }
+
+  if (currentUser.avatarPublicId) {
+    try {
+      await destroyCloudinaryAsset(currentUser.avatarPublicId)
+    } catch {
+      return { error: 'The stored photo could not be removed. Your profile picture was left in place.' }
+    }
+  }
+
+  await getDb().update(users).set({ avatarUrl: null, avatarPublicId: null }).where(eq(users.id, currentUser.id))
+  await getDb().update(authUser).set({ image: null, updatedAt: new Date() }).where(eq(authUser.id, currentUser.id))
+
+  refreshWorkhub()
+  return { ok: true as const }
 }
 
 export async function createManagementRequest(formData: FormData) {

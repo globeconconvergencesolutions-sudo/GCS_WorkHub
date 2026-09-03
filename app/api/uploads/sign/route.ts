@@ -8,8 +8,9 @@ import { deliverables, tasks } from '@/lib/db/schema'
 import { createSignedUpload, isCloudinaryConfigured } from '@/lib/uploads/cloudinary'
 import {
   ALLOWED_UPLOAD_MIME_TYPES,
+  AVATAR_UPLOAD_MIME_TYPES,
+  getUploadLimits,
   resolveUploadMime,
-  MAX_UPLOAD_BYTES,
   type UploadKind,
 } from '@/lib/uploads/config'
 
@@ -19,7 +20,7 @@ export const dynamic = 'force-dynamic'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function isUploadKind(value: unknown): value is UploadKind {
-  return value === 'task_attachment' || value === 'deliverable_evidence'
+  return value === 'task_attachment' || value === 'deliverable_evidence' || value === 'user_avatar'
 }
 
 export async function POST(request: Request) {
@@ -54,17 +55,29 @@ export async function POST(request: Request) {
   if (!isUploadKind(kind) || !UUID.test(entityId) || !fileName) {
     return NextResponse.json({ error: 'Choose a valid file and try again.' }, { status: 400 })
   }
+  const limits = getUploadLimits(kind)
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return NextResponse.json({ error: 'That file could not be read.' }, { status: 400 })
   }
-  if (bytes > MAX_UPLOAD_BYTES) {
-    return NextResponse.json({ error: 'Files must be 25 MB or smaller.' }, { status: 400 })
+  if (bytes > limits.maxBytes) {
+    return NextResponse.json(
+      { error: kind === 'user_avatar' ? 'Photos must be 5 MB or smaller.' : 'Files must be 25 MB or smaller.' },
+      { status: 400 },
+    )
   }
-  if (!resolveUploadMime(mimeType, fileName)) {
-    return NextResponse.json({ error: 'That file type is not allowed.' }, { status: 400 })
+  const resolvedMime = resolveUploadMime(mimeType, fileName)
+  if (!resolvedMime || !limits.mimeTypes.includes(resolvedMime)) {
+    return NextResponse.json(
+      { error: kind === 'user_avatar' ? 'Use a JPG, PNG, WebP, or GIF photo.' : 'That file type is not allowed.' },
+      { status: 400 },
+    )
   }
 
-  if (kind === 'task_attachment') {
+  if (kind === 'user_avatar') {
+    if (entityId !== currentUser.id) {
+      return NextResponse.json({ error: 'You can only change your own profile photo.' }, { status: 403 })
+    }
+  } else if (kind === 'task_attachment') {
     const [task] = await getDb().select().from(tasks).where(eq(tasks.id, entityId)).limit(1)
     if (!task || !canProgressTask(currentUser, task)) {
       return NextResponse.json({ error: 'You are not allowed to attach files to this task.' }, { status: 403 })
@@ -88,7 +101,7 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     ...signed,
-    allowedMimeTypes: ALLOWED_UPLOAD_MIME_TYPES,
-    maxBytes: MAX_UPLOAD_BYTES,
+    allowedMimeTypes: kind === 'user_avatar' ? AVATAR_UPLOAD_MIME_TYPES : ALLOWED_UPLOAD_MIME_TYPES,
+    maxBytes: limits.maxBytes,
   })
 }

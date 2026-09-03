@@ -17,6 +17,7 @@ import {
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
 import { StatusBadge } from '@/components/status-badge'
+import { UserAvatar } from '@/components/user-avatar'
 import { TASK_STATUS_LABELS } from '@/lib/constants'
 import { formatDue, formatRelative, ledBy } from '@/lib/format'
 import type { Person } from '@/lib/types'
@@ -35,7 +36,7 @@ type ProjectActivity = {
   id: string
   summary: string
   createdAt: string | Date
-  actor?: { initials: string; firstName: string; lastName: string } | null
+  actor?: { initials: string; firstName: string; lastName: string; avatarUrl?: string | null; avatarColor?: string | null } | null
 }
 
 type Project = {
@@ -57,7 +58,7 @@ type Project = {
   tasks: string
   taskIds?: string[]
   milestones?: Milestone[]
-  team?: Array<{ id: string; firstName: string; lastName: string; initials: string }>
+  team?: Array<{ id: string; firstName: string; lastName: string; initials: string; avatarUrl?: string | null; avatarColor?: string | null }>
   activity?: ProjectActivity[]
 }
 
@@ -101,10 +102,6 @@ function dateInputValue(value: string | Date | null | undefined) {
 function datesAreValid(startDate: string, dueDate: string) {
   if (startDate && dueDate && dueDate < startDate) return false
   return true
-}
-
-function Avatar({ initials }: { initials: string }) {
-  return <span className="avatar avatar-small">{initials}</span>
 }
 
 export function ProjectWorkspace({
@@ -558,7 +555,12 @@ export function ProjectWorkspace({
             <div className="employee-list">
               {(project.team ?? []).map((member) => (
                 <div className="employee-row" key={member.id}>
-                  <Avatar initials={member.initials} />
+                  <UserAvatar
+                    initials={member.initials}
+                    url={member.avatarUrl}
+                    color={member.avatarColor}
+                    size="sm"
+                  />
                   <div className="employee-main">
                     <strong>
                       {member.firstName} {member.lastName}
@@ -622,7 +624,12 @@ export function ProjectWorkspace({
             <div className="activity-list">
               {(project.activity ?? []).map((event) => (
                 <div className="activity-row" key={event.id}>
-                  <Avatar initials={event.actor?.initials ?? '—'} />
+                  <UserAvatar
+                    initials={event.actor?.initials ?? '—'}
+                    url={event.actor?.avatarUrl}
+                    color={event.actor?.avatarColor}
+                    size="sm"
+                  />
                   <div className="activity-copy">
                     <strong>
                       {event.actor ? `${event.actor.firstName} ${event.actor.lastName}` : 'System'} {event.summary}

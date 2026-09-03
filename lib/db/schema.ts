@@ -150,6 +150,8 @@ export const users = pgTable(
     passwordHash: text('password_hash'),
     initials: text('initials').notNull(),
     avatarColor: text('avatar_color').notNull().default('teal'),
+    avatarUrl: text('avatar_url'),
+    avatarPublicId: text('avatar_public_id'),
     status: userStatusEnum('status').notNull().default('active'),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
