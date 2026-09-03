@@ -24,7 +24,14 @@ export function ConfirmDialog({
   children?: ReactNode
 }) {
   return (
-    <div className="modal-backdrop confirm-backdrop" role="presentation" onMouseDown={onCancel}>
+    <div
+      className="modal-backdrop confirm-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        event.stopPropagation()
+        onCancel()
+      }}
+    >
       <div
         className="create-modal confirm-modal"
         role="dialog"

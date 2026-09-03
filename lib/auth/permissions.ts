@@ -120,6 +120,13 @@ export function canEditTask(
   return false
 }
 
+export function canDeleteTask(
+  user: Actor,
+  task: { assigneeId?: string | null; departmentId?: string | null },
+) {
+  return canEditTask(user, task)
+}
+
 export function canEditTaskActor(
   user: Actor,
   task: { assigneeId?: string | null; departmentId?: string | null },

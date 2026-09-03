@@ -7,6 +7,7 @@ import {
   canChangeResponsibilityOwner,
   canCreateWork,
   canDeactivateUser,
+  canDeleteTask,
   canEditTask,
   canInvite,
   canManageOrg,
@@ -62,7 +63,7 @@ import type {
 } from '@/lib/db/schema'
 import { resolveCategoryInput } from '@/lib/category'
 import { statusLabel } from '@/lib/format'
-import { destroyCloudinaryAsset, isOurCloudinaryUrl } from '@/lib/uploads/cloudinary'
+import { destroyCloudinaryAsset, isOurCloudinaryUrl, purgeCloudinaryPublicIds } from '@/lib/uploads/cloudinary'
 
 function refreshWorkhub() {
   revalidatePath('/')
@@ -929,7 +930,11 @@ export async function deleteAttachment(attachmentId: string) {
   if (!mayDelete) return denied('You are not allowed to remove this attachment.')
 
   if (attachment.publicId) {
-    await destroyCloudinaryAsset(attachment.publicId)
+    try {
+      await destroyCloudinaryAsset(attachment.publicId)
+    } catch {
+      return { error: 'Stored file could not be removed. The attachment was left in place.' }
+    }
   }
 
   await getDb().delete(taskAttachments).where(eq(taskAttachments.id, attachmentId))
@@ -983,6 +988,48 @@ export async function updateTaskProgress(taskId: string, progress: number) {
   return { ok: true }
 }
 
+async function maybeUnblockTask(
+  blockedTaskId: string,
+  companyId: string,
+  actorId: string | null,
+  summary: string,
+) {
+  const [blockedTask] = await getDb().select().from(tasks).where(eq(tasks.id, blockedTaskId)).limit(1)
+  if (!blockedTask || blockedTask.status !== 'blocked') return
+
+  const remaining = await getDb()
+    .select({ blockingTaskId: taskDependencies.blockingTaskId })
+    .from(taskDependencies)
+    .where(and(eq(taskDependencies.companyId, companyId), eq(taskDependencies.blockedTaskId, blockedTaskId)))
+
+  let ready = remaining.length === 0
+  if (!ready) {
+    const blockingTasks = await getDb()
+      .select()
+      .from(tasks)
+      .where(inArray(tasks.id, remaining.map((row) => row.blockingTaskId)))
+    ready = blockingTasks.every((task) => task.status === 'completed')
+  }
+  if (!ready) return
+
+  const newStatus = blockedTask.progress > 0 ? 'in_progress' : 'not_started'
+  await getDb()
+    .update(tasks)
+    .set({ status: newStatus, updatedAt: new Date() })
+    .where(eq(tasks.id, blockedTaskId))
+
+  if (actorId) {
+    await getDb().insert(activityEvents).values({
+      companyId,
+      actorId,
+      entityType: 'task',
+      entityId: blockedTaskId,
+      action: 'dependency_satisfied',
+      summary,
+    })
+  }
+}
+
 async function recalculateUnblockedTasks(
   completedTaskId: string,
   companyId: string,
@@ -993,42 +1040,51 @@ async function recalculateUnblockedTasks(
     .from(taskDependencies)
     .where(and(eq(taskDependencies.companyId, companyId), eq(taskDependencies.blockingTaskId, completedTaskId)))
 
-  for (const d of dependents) {
-    const blockedTaskId = d.blockedTaskId
-    const [blockedTask] = await getDb().select().from(tasks).where(eq(tasks.id, blockedTaskId)).limit(1)
-    if (!blockedTask) continue
-    if (blockedTask.status !== 'blocked') continue
+  for (const dependent of dependents) {
+    const [blockedTask] = await getDb().select().from(tasks).where(eq(tasks.id, dependent.blockedTaskId)).limit(1)
+    await maybeUnblockTask(
+      dependent.blockedTaskId,
+      companyId,
+      actorId,
+      blockedTask ? `unblocked ${blockedTask.title} after dependency completion` : 'unblocked a waiting task',
+    )
+  }
+}
 
-    const remaining = await getDb()
-      .select({ blockingTaskId: taskDependencies.blockingTaskId })
-      .from(taskDependencies)
-      .where(and(eq(taskDependencies.companyId, companyId), eq(taskDependencies.blockedTaskId, blockedTaskId)))
+async function collectTaskMediaPublicIds(taskIds: string[]) {
+  if (taskIds.length === 0) return []
+  const attachments = await getDb()
+    .select({ publicId: taskAttachments.publicId })
+    .from(taskAttachments)
+    .where(inArray(taskAttachments.taskId, taskIds))
+  const evidence = await getDb()
+    .select({ publicId: deliverables.evidencePublicId })
+    .from(deliverables)
+    .where(inArray(deliverables.taskId, taskIds))
+  return [...attachments.map((row) => row.publicId), ...evidence.map((row) => row.publicId)]
+}
 
-    if (remaining.length === 0) continue
+async function purgeTaskMediaThenDelete(taskIds: string[]) {
+  const uniqueIds = [...new Set(taskIds.filter(Boolean))]
+  if (uniqueIds.length === 0) return { ok: true as const }
 
-    const blockingIds = remaining.map((r) => r.blockingTaskId)
-    const blockingTasks = await getDb().select().from(tasks).where(inArray(tasks.id, blockingIds))
-    const allDone = blockingTasks.every((t) => t.status === 'completed')
+  const mediaIds = await collectTaskMediaPublicIds(uniqueIds)
+  try {
+    await purgeCloudinaryPublicIds(mediaIds)
+  } catch {
+    return { error: 'Stored files could not be removed. Nothing was deleted.' }
+  }
 
-    if (allDone) {
-      const newStatus = blockedTask.progress > 0 ? 'in_progress' : 'not_started'
-      await getDb()
-        .update(tasks)
-        .set({ status: newStatus, updatedAt: new Date() })
-        .where(eq(tasks.id, blockedTaskId))
-
-      if (actorId) {
-        await getDb().insert(activityEvents).values({
-          companyId,
-          actorId,
-          entityType: 'task',
-          entityId: blockedTaskId,
-          action: 'dependency_satisfied',
-          summary: `unblocked ${blockedTask.title} after dependency completion`,
-        })
-      }
+  try {
+    await getDb().delete(tasks).where(inArray(tasks.id, uniqueIds))
+  } catch {
+    return {
+      error:
+        'Files were removed from storage, but the records could not be deleted. Refresh and try again, or contact an admin.',
     }
   }
+
+  return { ok: true as const }
 }
 
 export async function createTaskDependency(blockingTaskId: string, blockedTaskId: string) {
@@ -1046,11 +1102,20 @@ export async function createTaskDependency(blockingTaskId: string, blockedTaskId
     return denied('You are not allowed to set dependencies on these tasks.')
   }
 
-  await getDb().insert(taskDependencies).values({
-    companyId: blockingTask.companyId,
-    blockingTaskId,
-    blockedTaskId,
-  })
+  let inserted: { id: string } | undefined
+  try {
+    const [row] = await getDb()
+      .insert(taskDependencies)
+      .values({
+        companyId: blockingTask.companyId,
+        blockingTaskId,
+        blockedTaskId,
+      })
+      .returning({ id: taskDependencies.id })
+    inserted = row
+  } catch {
+    return { error: 'That dependency already exists.' }
+  }
 
   // If the blocking task isn't completed, mark the blocked task as blocked for visibility.
   if (blockingTask.status !== 'completed' && blockedTask.status !== 'completed' && blockedTask.status !== 'cancelled') {
@@ -1070,7 +1135,168 @@ export async function createTaskDependency(blockingTaskId: string, blockedTaskId
   })
 
   refreshWorkhub()
-  return { ok: true }
+  return { ok: true as const, id: inserted?.id ?? null }
+}
+
+export async function deleteTaskDependency(dependencyId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [dependency] = await getDb()
+    .select()
+    .from(taskDependencies)
+    .where(eq(taskDependencies.id, dependencyId))
+    .limit(1)
+  if (!dependency) return { error: 'Dependency not found.' }
+
+  const [blockingTask] = await getDb().select().from(tasks).where(eq(tasks.id, dependency.blockingTaskId)).limit(1)
+  const [blockedTask] = await getDb().select().from(tasks).where(eq(tasks.id, dependency.blockedTaskId)).limit(1)
+  if (!blockingTask || !blockedTask) return { error: 'One or both tasks not found.' }
+  if (!canEditTask(currentUser, blockingTask) && !canEditTask(currentUser, blockedTask)) {
+    return denied('You are not allowed to remove this dependency.')
+  }
+
+  await getDb().delete(taskDependencies).where(eq(taskDependencies.id, dependencyId))
+  await maybeUnblockTask(
+    blockedTask.id,
+    blockedTask.companyId,
+    currentUser.id,
+    `unblocked ${blockedTask.title} after a dependency was removed`,
+  )
+
+  await getDb().insert(activityEvents).values({
+    companyId: blockedTask.companyId,
+    actorId: currentUser.id,
+    entityType: 'task',
+    entityId: blockedTask.id,
+    action: 'dependency_removed',
+    summary: `removed dependency: ${blockingTask.title} → ${blockedTask.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true as const }
+}
+
+export async function deleteTask(taskId: string) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, taskId)).limit(1)
+  if (!task) return { error: 'Task not found.' }
+  if (!canDeleteTask(currentUser, task)) return denied('You are not allowed to delete this task.')
+
+  const dependents = await getDb()
+    .select({ blockedTaskId: taskDependencies.blockedTaskId })
+    .from(taskDependencies)
+    .where(eq(taskDependencies.blockingTaskId, taskId))
+  const linkedProjects = await getDb()
+    .select({ projectId: projectMilestones.projectId })
+    .from(projectMilestoneTasks)
+    .innerJoin(projectMilestones, eq(projectMilestoneTasks.milestoneId, projectMilestones.id))
+    .where(eq(projectMilestoneTasks.taskId, taskId))
+
+  const purged = await purgeTaskMediaThenDelete([taskId])
+  if ('error' in purged) return purged
+
+  for (const dependent of dependents) {
+    await maybeUnblockTask(
+      dependent.blockedTaskId,
+      task.companyId,
+      currentUser.id,
+      'unblocked a waiting task after a blocker was deleted',
+    )
+  }
+  for (const projectId of [...new Set(linkedProjects.map((row) => row.projectId))]) {
+    await syncProjectProgress(projectId)
+  }
+
+  await getDb().insert(activityEvents).values({
+    companyId: task.companyId,
+    actorId: currentUser.id,
+    entityType: 'task',
+    entityId: taskId,
+    action: 'deleted',
+    summary: `deleted task ${task.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true as const }
+}
+
+export async function deleteProject(projectId: string, options?: { deleteLinkedTasks?: boolean }) {
+  const loaded = await requireManageableProject(projectId)
+  if ('error' in loaded) return loaded
+  const { currentUser, project } = loaded
+
+  const milestones = await getDb()
+    .select({ id: projectMilestones.id })
+    .from(projectMilestones)
+    .where(eq(projectMilestones.projectId, projectId))
+  const milestoneIds = milestones.map((row) => row.id)
+  const linkedTaskIds =
+    milestoneIds.length === 0
+      ? []
+      : [
+          ...new Set(
+            (
+              await getDb()
+                .select({ taskId: projectMilestoneTasks.taskId })
+                .from(projectMilestoneTasks)
+                .where(inArray(projectMilestoneTasks.milestoneId, milestoneIds))
+            ).map((row) => row.taskId),
+          ),
+        ]
+
+  const deleteLinkedTasks = Boolean(options?.deleteLinkedTasks) && linkedTaskIds.length > 0
+  if (deleteLinkedTasks) {
+    const dependents = await getDb()
+      .select({ blockedTaskId: taskDependencies.blockedTaskId, blockingTaskId: taskDependencies.blockingTaskId })
+      .from(taskDependencies)
+      .where(inArray(taskDependencies.blockingTaskId, linkedTaskIds))
+    const outsideDependents = [
+      ...new Set(
+        dependents
+          .filter((row) => !linkedTaskIds.includes(row.blockedTaskId))
+          .map((row) => row.blockedTaskId),
+      ),
+    ]
+
+    const purged = await purgeTaskMediaThenDelete(linkedTaskIds)
+    if ('error' in purged) return purged
+
+    for (const blockedTaskId of outsideDependents) {
+      await maybeUnblockTask(
+        blockedTaskId,
+        project.companyId,
+        currentUser.id,
+        'unblocked a waiting task after linked project work was deleted',
+      )
+    }
+  }
+
+  try {
+    await getDb().delete(projects).where(eq(projects.id, projectId))
+  } catch {
+    return {
+      error: deleteLinkedTasks
+        ? 'Linked files and tasks were removed, but the project record could not be deleted. Refresh and try again.'
+        : 'The project could not be deleted. Refresh and try again.',
+    }
+  }
+
+  await getDb().insert(activityEvents).values({
+    companyId: project.companyId,
+    actorId: currentUser.id,
+    entityType: 'project',
+    entityId: projectId,
+    action: 'deleted',
+    summary: deleteLinkedTasks
+      ? `deleted project ${project.title} and ${linkedTaskIds.length} linked ${linkedTaskIds.length === 1 ? 'task' : 'tasks'}`
+      : `deleted project ${project.title}`,
+  })
+
+  refreshWorkhub()
+  return { ok: true as const, deletedTaskIds: deleteLinkedTasks ? linkedTaskIds : [] }
 }
 
 async function getTaskApproverForDepartment(departmentId: string | null) {

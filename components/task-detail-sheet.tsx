@@ -1,8 +1,9 @@
 'use client'
 
-import type { Dispatch, SetStateAction } from 'react'
+import { useState, type Dispatch, SetStateAction } from 'react'
 import { GitBranch, ListChecks, MessageSquare, Paperclip, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CategoryField } from '@/components/category-field'
 import { StatusBadge } from '@/components/status-badge'
 import { FileDropzone, AttachmentRow } from '@/components/uploads/file-dropzone'
@@ -151,6 +152,8 @@ export function TaskDetailSheet({
   dependencyBlockingTaskId,
   onDependencyBlockingTaskId,
   onCreateDependency,
+  onDeleteDependency,
+  onDeleteTask,
 }: {
   task: DetailTask
   people: Person[]
@@ -213,7 +216,14 @@ export function TaskDetailSheet({
   dependencyBlockingTaskId: string
   onDependencyBlockingTaskId: (value: string) => void
   onCreateDependency: () => void
+  onDeleteDependency: (id: string) => void
+  onDeleteTask: () => void
 }) {
+  const [confirm, setConfirm] = useState<
+    | { kind: 'task' }
+    | { kind: 'dependency'; id: string; title: string }
+    | null
+  >(null)
   const attachmentCount = task.attachments?.length ?? 0
   const commentCount = task.comments?.length ?? 0
   const deliverableCount = task.deliverables?.length ?? 0
@@ -252,7 +262,7 @@ export function TaskDetailSheet({
               disabled={isPending || !canEdit}
             />
             <div className="td-head-meta">
-              <StatusBadge status={TASK_STATUS_LABELS[task.status]} />
+              <StatusBadge status={task.status} />
               <StatusBadge status={TASK_PRIORITY_LABELS[task.priority]} />
               <span>
                 {task.assignee ? fullName(task.assignee) : 'Unassigned'}
@@ -721,7 +731,25 @@ export function TaskDetailSheet({
                   ) : (
                     <div className="td-chip-row">
                       {task.blockedByDependencies!.map((dependency) => (
-                        <span key={dependency.id} className="filter-pill">{dependency.blockingTask.title}</span>
+                        <span key={dependency.id} className="td-dep-chip">
+                          {dependency.blockingTask.title}
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              aria-label={`Remove wait on ${dependency.blockingTask.title}`}
+                              disabled={isPending}
+                              onClick={() =>
+                                setConfirm({
+                                  kind: 'dependency',
+                                  id: dependency.id,
+                                  title: dependency.blockingTask.title,
+                                })
+                              }
+                            >
+                              <X aria-hidden="true" />
+                            </button>
+                          ) : null}
+                        </span>
                       ))}
                     </div>
                   )}
@@ -733,7 +761,25 @@ export function TaskDetailSheet({
                   ) : (
                     <div className="td-chip-row">
                       {task.blockingDependencies!.map((dependency) => (
-                        <span key={dependency.id} className="filter-pill">{dependency.blockedTask.title}</span>
+                        <span key={dependency.id} className="td-dep-chip">
+                          {dependency.blockedTask.title}
+                          {canEdit ? (
+                            <button
+                              type="button"
+                              aria-label={`Stop blocking ${dependency.blockedTask.title}`}
+                              disabled={isPending}
+                              onClick={() =>
+                                setConfirm({
+                                  kind: 'dependency',
+                                  id: dependency.id,
+                                  title: dependency.blockedTask.title,
+                                })
+                              }
+                            >
+                              <X aria-hidden="true" />
+                            </button>
+                          ) : null}
+                        </span>
                       ))}
                     </div>
                   )}
@@ -767,6 +813,11 @@ export function TaskDetailSheet({
         </div>
 
         <div className="workspace-sheet-footer">
+          {canEdit ? (
+            <Button variant="destructive" type="button" disabled={isPending} onClick={() => setConfirm({ kind: 'task' })}>
+              Delete task
+            </Button>
+          ) : null}
           {detailsError ? <p className="form-error">{detailsError}</p> : null}
           {detailsSaved && !detailsError ? <p className="form-ok">Saved.</p> : <p className="td-save-hint">Ctrl/⌘ S to save</p>}
           <Button variant="outline" type="button" onClick={onClose}>Close</Button>
@@ -780,6 +831,33 @@ export function TaskDetailSheet({
           </Button>
         </div>
       </div>
+      {confirm?.kind === 'task' ? (
+       <ConfirmDialog
+       title="Delete this task?"
+       description={`“${task.title}” and all associated comments, files, and links will be permanently deleted. This action cannot be undone.`}
+       confirmLabel="Delete task"
+       pending={isPending}
+       onCancel={() => setConfirm(null)}
+       onConfirm={() => {
+         setConfirm(null)
+         onDeleteTask()
+       }}
+     />
+      ) : null}
+      {confirm?.kind === 'dependency' ? (
+        <ConfirmDialog
+          title="Remove this dependency?"
+          description={`This task will no longer wait on “${confirm.title}”. Other work is not deleted.`}
+          confirmLabel="Remove link"
+          pending={isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => {
+            const id = confirm.id
+            setConfirm(null)
+            onDeleteDependency(id)
+          }}
+        />
+      ) : null}
     </div>
   )
 }

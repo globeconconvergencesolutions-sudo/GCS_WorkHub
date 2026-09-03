@@ -5,7 +5,9 @@ import { Plus, X } from 'lucide-react'
 import {
   addProjectMilestone,
   addProjectTeamMember,
+  deleteProject,
   deleteProjectMilestone,
+  deleteTask,
   linkTaskToMilestone,
   removeProjectTeamMember,
   unlinkTaskFromMilestone,
@@ -79,6 +81,8 @@ type ConfirmState =
       linkedCount: number
       rehomeMilestoneId: string
     }
+  | { kind: 'delete-task'; taskId: string; title: string }
+  | { kind: 'delete-project'; deleteLinkedTasks: boolean }
 
 function localIsoDate(daysFromToday = 0) {
   const date = new Date()
@@ -113,6 +117,9 @@ export function ProjectWorkspace({
   onBack,
   onCreateTask,
   onOpenTask,
+  onProjectDeleted,
+  onTaskRemoved,
+  canDeleteLinkedTask,
 }: {
   project: Project
   people: Person[]
@@ -123,6 +130,9 @@ export function ProjectWorkspace({
   onBack: () => void
   onCreateTask: (milestoneId: string) => void
   onOpenTask: (taskId: string) => void
+  onProjectDeleted: () => void
+  onTaskRemoved: (taskId: string) => void
+  canDeleteLinkedTask: (taskId: string) => boolean
 }) {
   const [isPending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
@@ -166,6 +176,7 @@ export function ProjectWorkspace({
     Boolean(milestoneTitle.trim()) && datesAreValid(milestoneStart, milestoneDue)
   const canSaveProject = Boolean(title.trim() && ownerId && departmentId)
   const canLinkTask = Boolean(linkMilestoneId && linkTaskId)
+  const linkedTaskCount = project.taskIds?.length ?? 0
 
   function run(action: () => Promise<{ error?: string } | { ok?: boolean } | void>) {
     setError(null)
@@ -203,6 +214,15 @@ export function ProjectWorkspace({
             {canCreateWork && defaultMilestoneId && (
               <Button className="create-button" type="button" onClick={() => onCreateTask(defaultMilestoneId)}>
                 <Plus data-icon="inline-start" /> Create task
+              </Button>
+            )}
+            {canManage && (
+              <Button
+                variant="destructive"
+                type="button"
+                onClick={() => setConfirm({ kind: 'delete-project', deleteLinkedTasks: false })}
+              >
+                Delete project
               </Button>
             )}
           </div>
@@ -413,6 +433,22 @@ export function ProjectWorkspace({
                               }
                             >
                               Unlink
+                            </button>
+                          )}
+                          {canDeleteLinkedTask(taskId) && (
+                            <button
+                              type="button"
+                              className="row-action row-action-danger"
+                              disabled={isPending}
+                              onClick={() =>
+                                setConfirm({
+                                  kind: 'delete-task',
+                                  taskId,
+                                  title: task.title,
+                                })
+                              }
+                            >
+                              Delete
                             </button>
                           )}
                         </div>
@@ -663,6 +699,59 @@ export function ProjectWorkspace({
           )}
           {confirm.linkedCount > 0 && (project.milestones ?? []).filter((milestone) => milestone.id !== confirm.milestoneId).length === 0 && (
             <p className="field-hint">This is the last milestone, so linked tasks will leave the project but remain as normal work.</p>
+          )}
+        </ConfirmDialog>
+      )}
+      {confirm?.kind === 'delete-task' && (
+       <ConfirmDialog
+       title="Delete this task?"
+       description={`“${confirm.title}” and all associated comments, files, and links will be permanently deleted. This action cannot be undone.`}
+       confirmLabel="Delete task"
+       pending={isPending}
+       onCancel={() => setConfirm(null)}
+       onConfirm={() =>
+         run(async () => {
+           const result = await deleteTask(confirm.taskId)
+           if (!result || !('error' in result) || !result.error) {
+             onTaskRemoved(confirm.taskId)
+           }
+           return result
+         })
+       }
+     />
+      )}
+      {confirm?.kind === 'delete-project' && (
+        <ConfirmDialog
+          title="Delete this project?"
+          description={`“${project.title}” will be removed from the portfolio. Linked tasks stay in the workspace unless you choose to delete them below.`}
+          confirmLabel="Delete project"
+          pending={isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() =>
+            run(async () => {
+              const result = await deleteProject(project.id, { deleteLinkedTasks: confirm.deleteLinkedTasks })
+              if (result && 'ok' in result && result.ok) {
+                const deletedTaskIds = 'deletedTaskIds' in result ? result.deletedTaskIds ?? [] : []
+                for (const taskId of deletedTaskIds) onTaskRemoved(taskId)
+                onProjectDeleted()
+              }
+              return result
+            })
+          }
+        >
+          {linkedTaskCount > 0 ? (
+            <label className="confirm-check">
+              <input
+                type="checkbox"
+                checked={confirm.deleteLinkedTasks}
+                onChange={(event) =>
+                  setConfirm({ ...confirm, deleteLinkedTasks: event.target.checked })
+                }
+              />
+              Also permanently delete {linkedTaskCount} linked {linkedTaskCount === 1 ? 'task' : 'tasks'} and their stored files
+            </label>
+          ) : (
+            <p className="field-hint">This project has no linked tasks.</p>
           )}
         </ConfirmDialog>
       )}

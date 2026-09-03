@@ -81,7 +81,11 @@ export function isOurCloudinaryUrl(url: string) {
 
 export async function destroyCloudinaryAsset(publicId: string) {
   if (!publicId.trim()) return
+  if (!isCloudinaryConfigured()) {
+    throw new Error('Cloudinary is not configured, so stored files cannot be removed.')
+  }
   const client = getCloudinary()
+  let notFound = false
   for (const resourceType of ['image', 'raw', 'video'] as const) {
     try {
       const result = await client.uploader.destroy(publicId, {
@@ -89,8 +93,18 @@ export async function destroyCloudinaryAsset(publicId: string) {
         invalidate: true,
       })
       if (result?.result === 'ok') return
+      if (result?.result === 'not found') notFound = true
     } catch {
       // Try the next Cloudinary resource type.
     }
+  }
+  if (notFound) return
+  throw new Error('Could not remove the stored file.')
+}
+
+export async function purgeCloudinaryPublicIds(publicIds: Array<string | null | undefined>) {
+  const unique = [...new Set(publicIds.map((value) => value?.trim()).filter(Boolean) as string[])]
+  for (const publicId of unique) {
+    await destroyCloudinaryAsset(publicId)
   }
 }

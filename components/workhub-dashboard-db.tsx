@@ -22,11 +22,13 @@ import {
   Settings2,
   ShieldCheck,
   Target,
+  Trash2,
   UsersRound,
   X,
 } from 'lucide-react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { StatusBadge } from '@/components/status-badge'
 import { CreateTaskDialog } from '@/components/create-task-dialog'
 import { CreateProjectDialog } from '@/components/create-project-dialog'
@@ -45,6 +47,7 @@ import { signOutToLogin } from '@/lib/auth/sign-out-client'
 import { resolveWorkspaceView, type WorkspaceView } from '@/lib/workspace-nav'
 import {
   canCreateWork as roleCanCreateWork,
+  canDeleteTask,
   canEditTask,
   canProgressTask,
   canManageOrg,
@@ -60,6 +63,8 @@ import {
   addComment,
   deleteAttachment,
   deleteComment,
+  deleteTask,
+  deleteTaskDependency,
   createTaskDependency,
   approveTask,
   approveDeliverable,
@@ -171,6 +176,10 @@ function parseDeadlineFilter(value: string | null): DeadlineFilter {
 function parseTaskFilter(value: string | null): 'All' | TaskStatus {
   if (value && (TASK_STATUSES as readonly string[]).includes(value)) return value as TaskStatus
   return 'All'
+}
+
+function taskRowStatusClass(status: TaskStatus) {
+  return `task-row--${status.replaceAll('_', '-')}`
 }
 
 function departmentHealth(department: DbDepartment) {
@@ -490,6 +499,8 @@ export default function WorkhubDashboardDB({
   const [detailsSaved, setDetailsSaved] = useState(false)
   const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null)
   const [dependencyBlockingTaskId, setDependencyBlockingTaskId] = useState('')
+  const [deleteTaskConfirm, setDeleteTaskConfirm] = useState<{ id: string; title: string } | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [approvalReason, setApprovalReason] = useState('')
   const [approvalError, setApprovalError] = useState<string | null>(null)
   const [deliverableTitle, setDeliverableTitle] = useState('')
@@ -646,6 +657,11 @@ export default function WorkhubDashboardDB({
   const currentDepartmentId = selectedDepartmentId
   const currentProjectTaskIds = selectedProject?.taskIds ?? []
   const taskSource = currentView === 'My tasks' && !allWorkScope ? initialMyTasks : tasks
+  const statusCounts = useMemo(() => {
+    const counts = Object.fromEntries(TASK_STATUSES.map((status) => [status, 0])) as Record<TaskStatus, number>
+    for (const task of taskSource) counts[task.status] += 1
+    return counts
+  }, [taskSource])
 
   const visibleTasks = taskSource.filter((task) => {
         const matchesDepartment =
@@ -845,17 +861,83 @@ export default function WorkhubDashboardDB({
     if (dependencyBlockingTaskId === selectedTask.id) return
 
     startTransition(async () => {
+      setDetailsError(null)
       const res = await createTaskDependency(dependencyBlockingTaskId, selectedTask.id)
-      if (!res || !('error' in res)) {
-        // Optimistic UI: mark as blocked if dependency is not satisfied yet.
-        const blocking = tasks.find((t) => t.id === dependencyBlockingTaskId)
-        const shouldBlock = blocking ? blocking.status !== 'completed' : true
-        if (shouldBlock) {
-          setTasks((current) => current.map((t) => (t.id === selectedTask.id ? { ...t, status: 'blocked' } : t)))
-          setSelectedTask((current) => (current?.id === selectedTask.id ? { ...current, status: 'blocked' } : current))
-        }
-        setDependencyBlockingTaskId('')
+      if (res && 'error' in res && res.error) {
+        setDetailsError(res.error)
+        return
       }
+      const blocking = tasks.find((entry) => entry.id === dependencyBlockingTaskId)
+      const shouldBlock = blocking ? blocking.status !== 'completed' : true
+      const dependencyId = res && 'id' in res && res.id ? res.id : `local-${dependencyBlockingTaskId}`
+      setSelectedTask((current) =>
+        current?.id === selectedTask.id
+          ? {
+              ...current,
+              status: shouldBlock ? 'blocked' : current.status,
+              blockedByDependencies: [
+                ...(current.blockedByDependencies ?? []),
+                {
+                  id: dependencyId,
+                  blockingTask: {
+                    id: dependencyBlockingTaskId,
+                    title: blocking?.title ?? 'Blocking task',
+                    status: blocking?.status ?? 'in_progress',
+                    dueDate: blocking?.dueDate ?? null,
+                  },
+                },
+              ],
+            }
+          : current,
+      )
+      if (shouldBlock) {
+        setTasks((current) => current.map((entry) => (entry.id === selectedTask.id ? { ...entry, status: 'blocked' } : entry)))
+      }
+      setDependencyBlockingTaskId('')
+      router.refresh()
+    })
+  }
+
+  function removeTaskFromLocalState(taskId: string) {
+    setTasks((current) => current.filter((task) => task.id !== taskId))
+    setSelectedTask((current) => (current?.id === taskId ? null : current))
+  }
+
+  function handleDeleteDependency(dependencyId: string) {
+    if (!selectedTask) return
+    startTransition(async () => {
+      setDetailsError(null)
+      const res = await deleteTaskDependency(dependencyId)
+      if (res && 'error' in res && res.error) {
+        setDetailsError(res.error)
+        return
+      }
+      setSelectedTask((current) =>
+        current
+          ? {
+              ...current,
+              blockedByDependencies: (current.blockedByDependencies ?? []).filter((item) => item.id !== dependencyId),
+              blockingDependencies: (current.blockingDependencies ?? []).filter((item) => item.id !== dependencyId),
+            }
+          : current,
+      )
+      router.refresh()
+    })
+  }
+
+  function handleDeleteTaskById(taskId: string) {
+    startTransition(async () => {
+      setDetailsError(null)
+      setDeleteError(null)
+      const res = await deleteTask(taskId)
+      if (res && 'error' in res && res.error) {
+        setDetailsError(res.error)
+        setDeleteError(res.error)
+        return
+      }
+      setDeleteTaskConfirm(null)
+      removeTaskFromLocalState(taskId)
+      router.refresh()
     })
   }
 
@@ -1276,24 +1358,25 @@ export default function WorkhubDashboardDB({
           >
             All<span>{taskSource.length}</span>
           </button>
-          {(['in_progress', 'waiting', 'blocked'] as const).map((value) => (
+          {(['in_progress', 'waiting', 'blocked', 'pending_approval', 'cancelled', 'completed', 'not_started'] as const).map((value) => (
             <button
               key={value}
-              className={filter === value ? 'filter-pill selected' : 'filter-pill'}
+              className={`filter-pill filter-status-${value.replaceAll('_', '-')} ${filter === value ? 'selected' : ''}`}
               onClick={() => patchQuery({ status: value })}
             >
               {TASK_STATUS_LABELS[value]}
+              <span>{statusCounts[value]}</span>
             </button>
           ))}
         </div>
-        <button className="view-all" onClick={() => patchQuery({ status: null, deadline: null, dept: null, employee: null })}>
+        <button className="view-all" onClick={() => patchQuery({ status: null, deadline: null, dept: null, employee: null, scope: currentView === 'My tasks' ? 'all' : null })}>
           View all <ArrowUpRight aria-hidden="true" />
         </button>
       </div>
       <div className="task-list">
         {visibleTasks.map((task) => (
           <div
-            className="task-row task-row-clickable"
+            className={`task-row task-row-clickable ${taskRowStatusClass(task.status)}`}
             key={task.id}
             onClick={() => setSelectedTask(task)}
           >
@@ -1313,6 +1396,20 @@ export default function WorkhubDashboardDB({
               )}
             </div>
             <StatusBadge status={task.status} />
+            {canDeleteTask(actor, task) ? (
+              <button
+                className="task-delete"
+                type="button"
+                aria-label={`Delete ${task.title}`}
+                disabled={isPending}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setDeleteTaskConfirm({ id: task.id, title: task.title })
+                }}
+              >
+                <Trash2 aria-hidden="true" />
+              </button>
+            ) : null}
             <button
               className="task-check"
               aria-label={`Mark ${task.title} complete`}
@@ -1320,7 +1417,7 @@ export default function WorkhubDashboardDB({
                 event.stopPropagation()
                 if (task.status !== 'completed') handleComplete(task.id)
               }}
-              disabled={task.status === 'completed' || isPending}
+              disabled={task.status === 'completed' || task.status === 'cancelled' || isPending}
             >
               <Check aria-hidden="true" />
             </button>
@@ -1806,7 +1903,7 @@ export default function WorkhubDashboardDB({
                   </div>
                   <div className="task-list">
                     {recentlyCompleted.map((task) => (
-                      <div className="task-row" key={task.id} style={{ opacity: 0.7 }}>
+                      <div className={`task-row ${taskRowStatusClass(task.status)}`} key={task.id}>
                         <div className="priority-bar" style={{ background: 'oklch(.55 .11 175)' }} />
                         <div className="task-main">
                           <strong style={{ textDecoration: 'line-through' }}>{task.title}</strong>
@@ -1979,6 +2076,12 @@ export default function WorkhubDashboardDB({
               onOpenTask={(taskId) => {
                 const task = tasks.find((entry) => entry.id === taskId)
                 if (task) setSelectedTask(task)
+              }}
+              onProjectDeleted={() => nav('Projects')}
+              onTaskRemoved={removeTaskFromLocalState}
+              canDeleteLinkedTask={(taskId) => {
+                const task = tasks.find((entry) => entry.id === taskId)
+                return task ? canDeleteTask(actor, task) : false
               }}
             />
           )}
@@ -2327,8 +2430,26 @@ export default function WorkhubDashboardDB({
           dependencyBlockingTaskId={dependencyBlockingTaskId}
           onDependencyBlockingTaskId={setDependencyBlockingTaskId}
           onCreateDependency={handleCreateDependency}
+          onDeleteDependency={handleDeleteDependency}
+          onDeleteTask={() => handleDeleteTaskById(selectedTask.id)}
         />
       )}
+
+      {deleteTaskConfirm ? (
+       <ConfirmDialog
+       title="Delete this task?"
+       description={`“${deleteTaskConfirm.title}” and all associated comments, files, and links will be permanently deleted. This action cannot be undone.`}
+       confirmLabel="Delete task"
+       pending={isPending}
+       onCancel={() => {
+         setDeleteTaskConfirm(null)
+         setDeleteError(null)
+       }}
+       onConfirm={() => handleDeleteTaskById(deleteTaskConfirm.id)}
+     >
+          {deleteError ? <p className="form-error">{deleteError}</p> : null}
+        </ConfirmDialog>
+      ) : null}
 
       {canCreateWork && showCreate && (
         <CreateTaskDialog

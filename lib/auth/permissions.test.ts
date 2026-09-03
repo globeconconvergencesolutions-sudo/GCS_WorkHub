@@ -1,5 +1,6 @@
 import {
   canDeactivateUser,
+  canDeleteTask,
   canEditTask,
   canInvite,
   canManageOrg,
@@ -51,6 +52,8 @@ assert(canProgressTask(employee, ownTask), 'employee can progress own tasks')
 assert(canEditTask(manager, deptTask), 'manager can edit department tasks')
 assert(!canEditTask(manager, otherDeptTask), 'manager cannot edit other departments')
 assert(canEditTask(employee, ownTask) && !canEditTask(employee, deptTask), 'employee edits own details only')
+assert(canDeleteTask(employee, ownTask) && !canDeleteTask(employee, deptTask), 'employee deletes own tasks only')
+assert(canDeleteTask(head, deptTask) && !canDeleteTask(head, otherDeptTask), 'head deletes department tasks only')
 
 assert(canInvite(md, { roleKey: 'employee', departmentId: 'dept-1' }), 'md can invite staff')
 assert(!canInvite(md, { roleKey: 'admin', departmentId: null }), 'md cannot invite admin')
