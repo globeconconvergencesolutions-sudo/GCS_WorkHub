@@ -66,6 +66,13 @@ export async function revokeAuthSessions(userId: string) {
   await getDb().delete(authSession).where(eq(authSession.userId, userId))
 }
 
+export async function deleteAuthIdentity(userId: string) {
+  const db = getDb()
+  await db.delete(authSession).where(eq(authSession.userId, userId))
+  await db.delete(authAccount).where(eq(authAccount.userId, userId))
+  await db.delete(authUser).where(eq(authUser.id, userId))
+}
+
 export async function provisionAuthIdentityForWorkhubUser(userId: string) {
   const row = await getDb().query.users.findFirst({
     where: eq(users.id, userId),

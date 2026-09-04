@@ -1,6 +1,7 @@
 import {
   canDeactivateUser,
   canDeleteTask,
+  canEditPerson,
   canEditTask,
   canInvite,
   canManageOrg,
@@ -106,5 +107,12 @@ assert(!canDeactivateUser(admin, admin, 1), 'cannot deactivate self')
 assert(!canDeactivateUser(admin, actor('a2', 'admin', null), 1), 'cannot deactivate last admin')
 assert(canDeactivateUser(admin, actor('a2', 'admin', null), 2), 'can deactivate extra admin')
 assert(canDeactivateUser(md, employee, 1), 'md can deactivate employees')
+
+assert(canEditPerson(admin, employee), 'admin can edit employees')
+assert(canEditPerson(admin, md), 'admin can edit md')
+assert(!canEditPerson(md, admin), 'md cannot edit admin')
+assert(canEditPerson(md, employee), 'md can edit employees')
+assert(!canEditPerson(employee, employee), 'employees cannot edit people')
+assert(!canEditPerson(head, employee), 'department head cannot edit people access')
 
 console.log('permissions tests passed')

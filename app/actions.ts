@@ -8,7 +8,9 @@ import {
   canCreateWork,
   canDeactivateUser,
   canDeleteTask,
+  canEditPerson,
   canEditTask,
+  canInvite,
   canManageOrg,
   canManageProject,
   canProgressTask,
@@ -2742,14 +2744,19 @@ export async function updateTeam(formData: FormData) {
 export async function updateUserPlacement(formData: FormData) {
   const currentUser = await getCurrentUser()
   if (!currentUser) return { error: 'Not signed in.' }
-  if (!canManageOrg(currentUser)) return denied('Only an admin can place people.')
 
   const userId = String(formData.get('userId') ?? '')
   if (!userId) return { error: 'Choose a person.' }
+  const target = await getUserById(userId)
+  if (!target) return { error: 'Person not found.' }
+  if (!canEditPerson(currentUser, target)) return denied('You are not allowed to edit this person.')
+
   const departmentId = String(formData.get('departmentId') ?? '') || null
   const teamId = String(formData.get('teamId') ?? '') || null
   const managerId = String(formData.get('managerId') ?? '') || null
   const roleKey = String(formData.get('roleKey') ?? '').trim()
+
+  if (managerId === userId) return { error: 'A person cannot report to themselves.' }
 
   await getDb()
     .update(users)
@@ -2757,10 +2764,24 @@ export async function updateUserPlacement(formData: FormData) {
     .where(eq(users.id, userId))
 
   if (roleKey) {
+    if (!canInvite(currentUser, { roleKey, departmentId })) {
+      return denied('You cannot grant that role.')
+    }
     const [role] = await getDb().select().from(roles).where(eq(roles.key, roleKey)).limit(1)
     if (!role) return { error: 'Choose a valid role.' }
     if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
       return { error: 'Department heads and managers need a department.' }
+    }
+    const targetIsAdmin = Boolean(target.roles?.some((entry) => entry.role.key === 'admin'))
+    if (targetIsAdmin && roleKey !== 'admin') {
+      const adminRole = await getDb().select().from(roles).where(eq(roles.key, 'admin')).limit(1)
+      const adminIds =
+        adminRole[0]
+          ? await getDb().select({ userId: userRoles.userId }).from(userRoles).where(eq(userRoles.roleId, adminRole[0].id))
+          : []
+      if (adminIds.length <= 1) {
+        return { error: 'You cannot remove the last workspace admin role.' }
+      }
     }
     await getDb().delete(userRoles).where(eq(userRoles.userId, userId))
     await getDb().insert(userRoles).values({ userId, roleId: role.id })

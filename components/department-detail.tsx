@@ -63,6 +63,8 @@ type DepartmentDetailProps = {
   onOpenProject?: (projectId: string) => void
   onOpenTask?: (taskId: string) => void
   onInvite?: () => void
+  onEditPerson?: (personId: string) => void
+  onRemovePerson?: (personId: string) => void
   onToggleStatus?: (personId: string) => void
   onResendInvite?: (personId: string) => void
   onCancelInvite?: (personId: string) => void
@@ -122,6 +124,8 @@ export function DepartmentDetailBody({
   onOpenProject,
   onOpenTask,
   onInvite,
+  onEditPerson,
+  onRemovePerson,
   onToggleStatus,
   onResendInvite,
   onCancelInvite,
@@ -218,15 +222,29 @@ export function DepartmentDetailBody({
                       </button>
                     ) : null}
                   </div>
-                ) : onToggleStatus && person.status !== 'invited' ? (
-                  <button
-                    type="button"
-                    className="row-action"
-                    disabled={busy}
-                    onClick={() => onToggleStatus(person.id)}
-                  >
-                    {person.status === 'active' ? 'Deactivate' : 'Activate'}
-                  </button>
+                ) : person.status !== 'invited' && (onEditPerson || onRemovePerson || onToggleStatus) ? (
+                  <div className="dept-person-actions">
+                    {onEditPerson ? (
+                      <button type="button" className="row-action" disabled={busy} onClick={() => onEditPerson(person.id)}>
+                        Edit
+                      </button>
+                    ) : null}
+                    {onRemovePerson ? (
+                      <button
+                        type="button"
+                        className="row-action row-action-danger"
+                        disabled={busy}
+                        onClick={() => onRemovePerson(person.id)}
+                      >
+                        Remove
+                      </button>
+                    ) : null}
+                    {onToggleStatus ? (
+                      <button type="button" className="row-action" disabled={busy} onClick={() => onToggleStatus(person.id)}>
+                        {person.status === 'active' ? 'Deactivate' : 'Activate'}
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
               </li>
             ))}

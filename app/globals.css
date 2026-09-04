@@ -1256,7 +1256,13 @@ html:has(.auth-shell) body { background: #020617; }
   .invite-credential-option { transition: none; }
 }
 
-.remove-person-modal { width: min(100%, 520px); }
+.edit-person-lead {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.45;
+}
+
 .remove-workload { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: color-mix(in oklch, var(--card) 92%, var(--background)); margin-bottom: 12px; }
 .remove-workload-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .remove-workload-head svg { width: 16px; height: 16px; color: oklch(.5 .1 255); }

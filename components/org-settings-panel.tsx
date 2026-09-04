@@ -219,7 +219,7 @@ export function OrgSettingsPanel({
         <div className="panel-heading">
           <div>
             <h2>Place a person</h2>
-            <p>One primary role, department, team, and manager</p>
+            <p>Or use Edit on the Departments people list — role, department, team, and manager</p>
           </div>
         </div>
         <form

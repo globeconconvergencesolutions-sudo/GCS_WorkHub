@@ -101,6 +101,7 @@ import {
 } from '@/app/actions'
 import { cancelInvite, resendInvite } from '@/app/invite-actions'
 import { RemovePersonDialog } from '@/components/remove-person-dialog'
+import { EditPersonDialog } from '@/components/edit-person-dialog'
 import type { Person } from '@/lib/types'
 import { taskCategoryEnum, taskPriorityEnum, taskStatusEnum } from '@/lib/db/schema'
 
@@ -454,9 +455,14 @@ type Metrics = {
 }
 
 type Employee = Person & {
+  email?: string
+  teamId?: string | null
+  managerId?: string | null
   department?: { id?: string; name: string } | null
-  manager?: { firstName: string; lastName: string } | null
+  team?: { id?: string; name: string } | null
+  manager?: { id?: string; firstName: string; lastName: string } | null
   status?: string
+  roles?: { role: { key: string; name: string } }[]
 }
 
 export default function WorkhubDashboardDB({
@@ -559,6 +565,7 @@ export default function WorkhubDashboardDB({
   const [dependencyBlockingTaskId, setDependencyBlockingTaskId] = useState('')
   const [deleteTaskConfirm, setDeleteTaskConfirm] = useState<{ id: string; title: string } | null>(null)
   const [removePersonTarget, setRemovePersonTarget] = useState<Employee | null>(null)
+  const [editPersonTarget, setEditPersonTarget] = useState<Employee | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [approvalReason, setApprovalReason] = useState('')
   const [approvalError, setApprovalError] = useState<string | null>(null)
@@ -2345,7 +2352,10 @@ export default function WorkhubDashboardDB({
                           />
                           <div className="employee-main">
                             <strong>{fullName(employee)}</strong>
-                            <span>{employee.jobTitle}</span>
+                            <span>
+                              {employee.jobTitle}
+                              {employee.roles?.[0]?.role?.name ? ` · ${employee.roles[0].role.name}` : ''}
+                            </span>
                           </div>
                           <span>{employee.department?.name ?? '—'}</span>
                           <span>{employee.manager ? `Reports to ${fullName(employee.manager)}` : '—'}</span>
@@ -2359,6 +2369,16 @@ export default function WorkhubDashboardDB({
                             }
                           />
                           <div className="employee-actions">
+                            {canManagePeople && employee.status !== 'invited' ? (
+                              <button
+                                type="button"
+                                className="row-action"
+                                disabled={isPending}
+                                onClick={() => setEditPersonTarget(employee)}
+                              >
+                                Edit
+                              </button>
+                            ) : null}
                             {canInvitePeople && employee.status === 'invited' ? (
                               <>
                                 <button
@@ -2379,7 +2399,7 @@ export default function WorkhubDashboardDB({
                                 </button>
                               </>
                             ) : null}
-                            {canManagePeople && employee.status === 'active' ? (
+                            {canManagePeople && employee.status !== 'invited' ? (
                               <button
                                 type="button"
                                 className="row-action row-action-danger"
@@ -2393,7 +2413,7 @@ export default function WorkhubDashboardDB({
                               <button
                                 className="filter-pill"
                                 style={{ fontSize: 9, padding: '4px 8px' }}
-                                disabled={isPending}
+                                disabled={isPending || employee.id === currentUserId}
                                 onClick={() => handleToggleUserStatus(employee.id)}
                               >
                                 {employee.status === 'active' ? 'Deactivate' : 'Activate'}
@@ -2433,6 +2453,22 @@ export default function WorkhubDashboardDB({
                       if (task) setSelectedTask(task)
                     }}
                     onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
+                    onEditPerson={
+                      canManagePeople
+                        ? (personId) => {
+                            const target = people.find((entry) => entry.id === personId) ?? null
+                            if (target) setEditPersonTarget(target)
+                          }
+                        : undefined
+                    }
+                    onRemovePerson={
+                      canManagePeople
+                        ? (personId) => {
+                            const target = people.find((entry) => entry.id === personId) ?? null
+                            if (target && target.id !== currentUserId) setRemovePersonTarget(target)
+                          }
+                        : undefined
+                    }
                     onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
                     onResendInvite={canInvitePeople ? handleResendInvite : undefined}
                     onCancelInvite={canInvitePeople ? handleCancelInvite : undefined}
@@ -2782,6 +2818,22 @@ export default function WorkhubDashboardDB({
             if (task) setSelectedTask(task)
           }}
           onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
+          onEditPerson={
+            canManagePeople
+              ? (personId) => {
+                  const target = people.find((entry) => entry.id === personId) ?? null
+                  if (target) setEditPersonTarget(target)
+                }
+              : undefined
+          }
+          onRemovePerson={
+            canManagePeople
+              ? (personId) => {
+                  const target = people.find((entry) => entry.id === personId) ?? null
+                  if (target && target.id !== currentUserId) setRemovePersonTarget(target)
+                }
+              : undefined
+          }
           onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
           onResendInvite={canInvitePeople ? handleResendInvite : undefined}
           onCancelInvite={canInvitePeople ? handleCancelInvite : undefined}
@@ -2969,6 +3021,21 @@ export default function WorkhubDashboardDB({
           people={activePeople}
           onClose={() => setRemovePersonTarget(null)}
           onRemoved={() => router.refresh()}
+        />
+      )}
+      {canManagePeople && editPersonTarget && (
+        <EditPersonDialog
+          person={editPersonTarget}
+          people={people}
+          departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+          teams={workspaceTeams.map((team) => ({
+            id: team.id,
+            name: team.name,
+            departmentId: team.departmentId ?? null,
+          }))}
+          roles={inviteRoles.length > 0 ? inviteRoles : workspaceRoles}
+          onClose={() => setEditPersonTarget(null)}
+          onSaved={() => router.refresh()}
         />
       )}
     </WorkhubShell>

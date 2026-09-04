@@ -35,9 +35,11 @@ export function RemovePersonDialog({
 
   const recipients = useMemo(
     () =>
-      people.filter(
-        (entry) => entry.id !== person.id && (entry.status === 'active' || entry.status == null),
-      ),
+      people.filter((entry) => {
+        if (entry.id === person.id) return false
+        const status = entry.status ?? 'active'
+        return status === 'active' || status === 'invited'
+      }),
     [people, person.id],
   )
 
@@ -94,7 +96,7 @@ export function RemovePersonDialog({
         <div className="modal-heading">
           <div>
             <span className="eyebrow">People</span>
-            <h2 id="remove-person-title">Remove {expectedName}</h2>
+            <h2 id="remove-person-title">Permanently remove {expectedName}</h2>
           </div>
           <button className="close-button" type="button" aria-label="Close dialog" onClick={onClose}>
             <X aria-hidden="true" />
@@ -102,8 +104,9 @@ export function RemovePersonDialog({
         </div>
 
         <p className="confirm-copy">
-          This removes them from WorkHub (deactivates the account and signs them out). Historical activity stays for
-          audit. Open work must be handed off first.
+          This permanently deletes their WorkHub account and sign-in. They disappear from the people list and cannot
+          log in again. Use <strong>Deactivate</strong> instead if you only need to pause access. Open ownership and
+          approval records must be handed off first.
         </p>
 
         {loadError ? <p className="form-error">{loadError}</p> : null}
@@ -112,7 +115,7 @@ export function RemovePersonDialog({
           <div className="remove-workload">
             <div className="remove-workload-head">
               <ArrowRightLeft aria-hidden="true" />
-              <strong>Work that needs a home</strong>
+              <strong>Work and records that need a home</strong>
             </div>
             <ul>
               <li>
@@ -139,6 +142,10 @@ export function RemovePersonDialog({
                 <span>Open requests</span>
                 <em>{workload.openManagementRequests}</em>
               </li>
+              <li>
+                <span>Approval records</span>
+                <em>{workload.approvalRecords}</em>
+              </li>
             </ul>
           </div>
         ) : !loadError ? (
@@ -159,7 +166,7 @@ export function RemovePersonDialog({
             </select>
           </label>
         ) : workload ? (
-          <p className="form-success">No open ownership to transfer. You can remove them directly.</p>
+          <p className="form-success">No ownership to transfer. You can permanently remove them.</p>
         ) : null}
 
         <label className="remove-confirm">
@@ -180,7 +187,7 @@ export function RemovePersonDialog({
           </Button>
           <Button variant="destructive" type="button" disabled={!canSubmit || pending} onClick={submit}>
             <Trash2 data-icon="inline-start" />
-            {pending ? 'Removing…' : 'Remove person'}
+            {pending ? 'Removing…' : 'Permanently remove'}
           </Button>
         </div>
       </div>

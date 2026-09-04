@@ -1,4 +1,4 @@
-import { and, count, eq, ne, notInArray } from 'drizzle-orm'
+import { and, count, eq, ne, notInArray, or } from 'drizzle-orm'
 import { getDb } from '@/lib/db'
 import {
   departments,
@@ -7,6 +7,7 @@ import {
   projects,
   responsibilities,
   responsibilityAssignees,
+  taskApprovals,
   tasks,
   users,
 } from '@/lib/db/schema'
@@ -22,6 +23,7 @@ export type PersonWorkload = {
   directReports: number
   departmentsLed: number
   openManagementRequests: number
+  approvalRecords: number
   total: number
   requiresTransfer: boolean
 }
@@ -37,16 +39,12 @@ export async function getPersonWorkload(userId: string): Promise<PersonWorkload>
     [directReports],
     [departmentsLed],
     [openManagementRequests],
+    [approvalRecords],
   ] = await Promise.all([
     db.select({ value: count() }).from(tasks).where(and(eq(tasks.assigneeId, userId), OPEN_TASK)),
-    db
-      .select({ value: count() })
-      .from(projects)
-      .where(and(eq(projects.ownerId, userId), ne(projects.status, 'archived'))),
-    db
-      .select({ value: count() })
-      .from(responsibilities)
-      .where(and(eq(responsibilities.ownerId, userId), ne(responsibilities.status, 'completed'))),
+    // All owned projects (including archived) — owner_id is ON DELETE RESTRICT.
+    db.select({ value: count() }).from(projects).where(eq(projects.ownerId, userId)),
+    db.select({ value: count() }).from(responsibilities).where(eq(responsibilities.ownerId, userId)),
     db.select({ value: count() }).from(responsibilityAssignees).where(eq(responsibilityAssignees.userId, userId)),
     db.select({ value: count() }).from(projectTeams).where(eq(projectTeams.userId, userId)),
     db.select({ value: count() }).from(users).where(and(eq(users.managerId, userId), ne(users.status, 'inactive'))),
@@ -60,6 +58,10 @@ export async function getPersonWorkload(userId: string): Promise<PersonWorkload>
           notInArray(managementRequests.status, ['resolved', 'cancelled']),
         ),
       ),
+    db
+      .select({ value: count() })
+      .from(taskApprovals)
+      .where(or(eq(taskApprovals.requestorId, userId), eq(taskApprovals.approverId, userId))),
   ])
 
   const workload: PersonWorkload = {
@@ -71,6 +73,7 @@ export async function getPersonWorkload(userId: string): Promise<PersonWorkload>
     directReports: directReports?.value ?? 0,
     departmentsLed: departmentsLed?.value ?? 0,
     openManagementRequests: openManagementRequests?.value ?? 0,
+    approvalRecords: approvalRecords?.value ?? 0,
     total: 0,
     requiresTransfer: false,
   }
@@ -80,16 +83,16 @@ export async function getPersonWorkload(userId: string): Promise<PersonWorkload>
     workload.ownedResponsibilities +
     workload.directReports +
     workload.departmentsLed +
-    workload.openManagementRequests
-  // Projects and responsibilities use ON DELETE RESTRICT — must transfer before remove.
-  workload.requiresTransfer =
-    workload.ownedProjects > 0 || workload.ownedResponsibilities > 0 || workload.total > 0
+    workload.openManagementRequests +
+    workload.approvalRecords
+  // Projects / responsibilities / approvals use ON DELETE RESTRICT — must hand off before hard delete.
+  workload.requiresTransfer = workload.total > 0
   return workload
 }
 
 /**
  * Moves ownership and open assignments off `fromUserId` onto `toUserId`, then
- * clears memberships that would otherwise block removal.
+ * clears memberships that would otherwise block permanent removal.
  */
 export async function reassignPersonWork(fromUserId: string, toUserId: string) {
   if (fromUserId === toUserId) {
@@ -101,8 +104,8 @@ export async function reassignPersonWork(fromUserId: string, toUserId: string) {
     .from(users)
     .where(eq(users.id, toUserId))
     .limit(1)
-  if (!recipient || recipient.status !== 'active') {
-    throw new Error('Work can only be transferred to an active person.')
+  if (!recipient || recipient.status === 'inactive') {
+    throw new Error('Work can only be transferred to an active (or invited) person.')
   }
 
   await db
@@ -110,15 +113,9 @@ export async function reassignPersonWork(fromUserId: string, toUserId: string) {
     .set({ assigneeId: toUserId, updatedAt: new Date() })
     .where(and(eq(tasks.assigneeId, fromUserId), OPEN_TASK))
 
-  await db
-    .update(projects)
-    .set({ ownerId: toUserId, updatedAt: new Date() })
-    .where(and(eq(projects.ownerId, fromUserId), ne(projects.status, 'archived')))
-
-  await db
-    .update(responsibilities)
-    .set({ ownerId: toUserId })
-    .where(and(eq(responsibilities.ownerId, fromUserId), ne(responsibilities.status, 'completed')))
+  // Every owned project/responsibility — RESTRICT blocks hard delete otherwise.
+  await db.update(projects).set({ ownerId: toUserId, updatedAt: new Date() }).where(eq(projects.ownerId, fromUserId))
+  await db.update(responsibilities).set({ ownerId: toUserId }).where(eq(responsibilities.ownerId, fromUserId))
 
   await db.update(users).set({ managerId: toUserId }).where(eq(users.managerId, fromUserId))
   await db.update(departments).set({ ownerId: toUserId }).where(eq(departments.ownerId, fromUserId))
@@ -131,6 +128,15 @@ export async function reassignPersonWork(fromUserId: string, toUserId: string) {
         notInArray(managementRequests.status, ['resolved', 'cancelled']),
       ),
     )
+
+  await db
+    .update(taskApprovals)
+    .set({ requestorId: toUserId })
+    .where(eq(taskApprovals.requestorId, fromUserId))
+  await db
+    .update(taskApprovals)
+    .set({ approverId: toUserId })
+    .where(eq(taskApprovals.approverId, fromUserId))
 
   await db.delete(projectTeams).where(eq(projectTeams.userId, fromUserId))
   const owned = await db.select({ id: projects.id }).from(projects).where(eq(projects.ownerId, toUserId))
@@ -153,4 +159,9 @@ export async function clearPersonSideEffects(userId: string) {
   await db.update(departments).set({ ownerId: null }).where(eq(departments.ownerId, userId))
   await db.delete(projectTeams).where(eq(projectTeams.userId, userId))
   await db.delete(responsibilityAssignees).where(eq(responsibilityAssignees.userId, userId))
+}
+
+/** Final nullify / membership wipe before deleting the users row. */
+export async function preparePersonHardDelete(userId: string) {
+  await clearPersonSideEffects(userId)
 }

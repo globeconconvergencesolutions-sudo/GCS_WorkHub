@@ -199,6 +199,18 @@ export function canDeactivateUser(actor: Actor, target: Actor, remainingAdminCou
   return true
 }
 
+/** Who may edit another person's profile, placement, and primary role. */
+export function canEditPerson(actor: Actor, target: Actor) {
+  if (!actor || !target) return false
+  if (!canManageUsers(actor)) return false
+  if (isAdmin(target) && !isAdmin(actor)) return false
+  return true
+}
+
+export function assignableRoleKeys(actor: Actor): RoleKey[] {
+  return inviteableRoleKeys(actor)
+}
+
 export function denied(message = 'You are not allowed to do that.') {
   return { error: message }
 }

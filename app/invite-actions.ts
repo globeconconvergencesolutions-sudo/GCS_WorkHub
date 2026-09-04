@@ -1,6 +1,6 @@
 'use server'
 
-import { canDeactivateUser, canInvite, canManageUsers, denied, isDepartmentHead, isManagement } from '@/lib/auth/permissions'
+import { canDeactivateUser, canEditPerson, canInvite, canManageUsers, denied, isDepartmentHead, isManagement } from '@/lib/auth/permissions'
 import {
   createUserInvite,
   findOpenInviteByToken,
@@ -10,21 +10,27 @@ import {
   markInviteConsumed,
   PASSWORD_RESET_HOURS,
 } from '@/lib/auth/invite-tokens'
-import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
+import { deleteAuthIdentity, provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById } from '@/lib/db/queries'
 import {
   activityEvents,
+  authUser,
   departments,
   notificationPreferences,
   roles,
+  teams,
   userRoles,
   users,
 } from '@/lib/db/schema'
-import { fullName } from '@/lib/format'
+import { fullName, makeInitials } from '@/lib/format'
 import { getPublicAppUrl, isMailConfigured, sendMail } from '@/lib/mail/send'
 import { inviteSetupEmail, passwordResetEmail, tempPasswordEmail } from '@/lib/mail/templates'
-import { clearPersonSideEffects, getPersonWorkload, reassignPersonWork } from '@/lib/people/workload'
+import {
+  getPersonWorkload,
+  preparePersonHardDelete,
+  reassignPersonWork,
+} from '@/lib/people/workload'
 import { eq } from 'drizzle-orm'
 import { revalidatePath } from 'next/cache'
 import { headers } from 'next/headers'
@@ -625,28 +631,31 @@ export async function removePerson(input: { userId: string; transferToUserId?: s
 
   const workload = await getPersonWorkload(target.id)
   const transferToUserId = input.transferToUserId?.trim() || null
+  const successorId = transferToUserId || (workload.requiresTransfer ? null : currentUser.id)
 
   if (workload.requiresTransfer) {
-    if (!transferToUserId) {
-      return { error: 'Choose someone to receive their open work before removing them.' }
+    if (!successorId || successorId === target.id) {
+      return { error: 'Choose someone to receive their work and records before permanently removing them.' }
     }
     try {
-      await reassignPersonWork(target.id, transferToUserId)
+      await reassignPersonWork(target.id, successorId)
     } catch (error) {
       return { error: error instanceof Error ? error.message : 'Could not transfer their work.' }
     }
+  } else if (successorId && successorId !== target.id) {
+    // Hand off any residual RESTRICT rows (approvals etc.) to the acting admin.
+    try {
+      await reassignPersonWork(target.id, successorId)
+    } catch {
+      await preparePersonHardDelete(target.id)
+    }
   } else {
-    await clearPersonSideEffects(target.id)
+    await preparePersonHardDelete(target.id)
   }
 
-  // Soft-remove: keep history (approvals etc. use RESTRICT) but lock them out.
-  await invalidateOpenInvites(target.id)
-  await getDb().update(users).set({ status: 'inactive', mustChangePassword: false }).where(eq(users.id, target.id))
-  await revokeAuthSessions(target.id)
-
   const company = await getCompany()
+  const recipient = transferToUserId ? await getUserById(transferToUserId) : null
   if (company) {
-    const recipient = transferToUserId ? await getUserById(transferToUserId) : null
     await getDb().insert(activityEvents).values({
       companyId: company.id,
       actorId: currentUser.id,
@@ -654,8 +663,131 @@ export async function removePerson(input: { userId: string; transferToUserId?: s
       entityId: target.id,
       action: 'removed',
       summary: recipient
-        ? `removed ${fullName(target)} and transferred their work to ${fullName(recipient)}`
-        : `removed ${fullName(target)} from WorkHub`,
+        ? `permanently removed ${fullName(target)} and transferred their work to ${fullName(recipient)}`
+        : `permanently removed ${fullName(target)} from WorkHub`,
+    })
+  }
+
+  await invalidateOpenInvites(target.id)
+  await deleteAuthIdentity(target.id)
+  await getDb().delete(users).where(eq(users.id, target.id))
+
+  refreshWorkhub()
+  return { ok: true as const }
+}
+
+export async function updatePerson(formData: FormData) {
+  const currentUser = await getCurrentUser()
+  if (!currentUser) return { error: 'Not signed in.' }
+
+  const userId = String(formData.get('userId') ?? '').trim()
+  if (!userId) return { error: 'Choose a person.' }
+
+  const target = await getUserById(userId)
+  if (!target) return { error: 'Person not found.' }
+  if (!canEditPerson(currentUser, target)) {
+    return denied('You are not allowed to edit this person.')
+  }
+
+  const firstName = String(formData.get('firstName') ?? '').trim()
+  const lastName = String(formData.get('lastName') ?? '').trim()
+  const jobTitle = String(formData.get('jobTitle') ?? '').trim()
+  const email = String(formData.get('email') ?? '').trim().toLowerCase()
+  const departmentId = String(formData.get('departmentId') ?? '').trim() || null
+  const teamId = String(formData.get('teamId') ?? '').trim() || null
+  const managerId = String(formData.get('managerId') ?? '').trim() || null
+  const roleKey = String(formData.get('roleKey') ?? '').trim()
+
+  if (!firstName || !lastName || !jobTitle || !email) {
+    return { error: 'Name, email, and job title are required.' }
+  }
+  if (!email.includes('@')) return { error: 'Enter a valid work email.' }
+  if (managerId === userId) return { error: 'A person cannot report to themselves.' }
+
+  const existingEmail = await getUserByEmail(email)
+  if (existingEmail && existingEmail.id !== userId) {
+    return { error: 'Another person already uses that email.' }
+  }
+
+  if (teamId) {
+    const [team] = await getDb().select().from(teams).where(eq(teams.id, teamId)).limit(1)
+    if (!team) return { error: 'Choose a valid team.' }
+    if (departmentId && team.departmentId !== departmentId) {
+      return { error: 'That team does not belong to the selected department.' }
+    }
+  }
+
+  if (managerId) {
+    const manager = await getUserById(managerId)
+    if (!manager || manager.status === 'inactive') {
+      return { error: 'Choose an active manager.' }
+    }
+  }
+
+  if (roleKey) {
+    if (!canInvite(currentUser, { roleKey, departmentId })) {
+      return denied('You cannot grant that role.')
+    }
+    if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
+      return { error: 'Department heads and managers need a department.' }
+    }
+
+    const targetIsAdmin = Boolean(target.roles?.some((entry) => entry.role.key === 'admin'))
+    if (targetIsAdmin && roleKey !== 'admin') {
+      const adminRole = await getDb().select().from(roles).where(eq(roles.key, 'admin')).limit(1)
+      const adminIds =
+        adminRole[0]
+          ? await getDb().select({ userId: userRoles.userId }).from(userRoles).where(eq(userRoles.roleId, adminRole[0].id))
+          : []
+      if (adminIds.length <= 1) {
+        return { error: 'You cannot remove the last workspace admin role.' }
+      }
+    }
+
+    const [role] = await getDb().select().from(roles).where(eq(roles.key, roleKey)).limit(1)
+    if (!role) return { error: 'Choose a valid role.' }
+    await getDb().delete(userRoles).where(eq(userRoles.userId, userId))
+    await getDb().insert(userRoles).values({ userId, roleId: role.id })
+  }
+
+  const initials = makeInitials(firstName, lastName)
+  await getDb()
+    .update(users)
+    .set({
+      firstName,
+      lastName,
+      jobTitle,
+      email,
+      initials,
+      departmentId,
+      teamId,
+      managerId,
+    })
+    .where(eq(users.id, userId))
+
+  await getDb()
+    .update(authUser)
+    .set({ name: `${firstName} ${lastName}`.trim(), email, updatedAt: new Date() })
+    .where(eq(authUser.id, userId))
+
+  if (target.passwordHash) {
+    await provisionAuthIdentity({
+      userId,
+      email,
+      name: `${firstName} ${lastName}`.trim(),
+      passwordHash: target.passwordHash,
+    })
+  }
+
+  const company = await getCompany()
+  if (company) {
+    await getDb().insert(activityEvents).values({
+      companyId: company.id,
+      actorId: currentUser.id,
+      entityType: 'user',
+      entityId: userId,
+      action: 'updated',
+      summary: `updated access and details for ${firstName} ${lastName}`,
     })
   }
 

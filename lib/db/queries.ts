@@ -85,7 +85,9 @@ export async function listPeople(viewer?: CurrentUser | null) {
         : or(eq(users.status, 'active'), eq(users.status, 'invited')),
     with: {
       department: true,
+      team: true,
       manager: true,
+      roles: { with: { role: true } },
     },
     orderBy: [asc(users.firstName), asc(users.lastName)],
   })
