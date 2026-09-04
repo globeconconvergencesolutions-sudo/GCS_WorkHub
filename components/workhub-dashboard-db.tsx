@@ -47,6 +47,13 @@ import {
 import { formatDue, formatLongDate, formatRelative, fullName, greeting, categoryLabel, ledBy, toDateInputValue } from '@/lib/format'
 import { signOutToLogin } from '@/lib/auth/sign-out-client'
 import { resolveWorkspaceView, type WorkspaceView } from '@/lib/workspace-nav'
+import { DepartmentDetailBody, DepartmentDrawer } from '@/components/department-detail'
+import {
+  departmentHealth,
+  departmentPosture,
+  departmentPostureShowsGrid,
+  departmentViewCopy,
+} from '@/lib/department-view'
 import {
   canCreateWork as roleCanCreateWork,
   canDeleteTask,
@@ -232,13 +239,6 @@ function taskRowStatusClass(status: TaskStatus) {
   return `task-row--${status.replaceAll('_', '-')}`
 }
 
-function departmentHealth(department: DbDepartment) {
-  if (department.total === 0) return 'No work yet'
-  if (department.progress >= 80) return 'On track'
-  if (department.progress >= 40) return 'In motion'
-  return 'Needs attention'
-}
-
 function sortDepartmentsForScorecard(departments: DbDepartment[]) {
   return [...departments].sort((left, right) => {
     if (left.total === 0 && right.total !== 0) return 1
@@ -343,6 +343,9 @@ type DbDepartment = {
   progress: number
   total: number
   completed: number
+  active?: number
+  blocked?: number
+  overdue?: number
   color: string
   teams?: { id: string }[]
 }
@@ -607,7 +610,13 @@ export default function WorkhubDashboardDB({
   const isManagement = roleSet.has('admin') || roleSet.has('managing_director')
   const isDepartmentLeader = roleSet.has('department_head') || roleSet.has('manager')
   const canCreateWork = roleCanCreateWork(actor)
-  const canViewDepartments = isManagement || isDepartmentLeader
+  const currentUserDepartmentId = currentUser?.departmentId ?? null
+  const posture = departmentPosture({ roleKeys: currentUserRoles, departmentId: currentUserDepartmentId })
+  const showsDepartmentGrid = departmentPostureShowsGrid(posture)
+  // Everyone belonging to a department can open it; only management browses the set.
+  const canViewDepartments = posture !== 'none'
+  const ownDepartment = initialDepartments.find((department) => department.id === currentUserDepartmentId) ?? null
+  const departmentCopy = departmentViewCopy(posture, ownDepartment?.name)
   const canViewProjects = isManagement || isDepartmentLeader || projects.length > 0
   const canViewReports = canViewCompanyReports(actor) || canViewDepartmentReports(actor)
   const canManagePeople = canManageUsers(actor)
@@ -620,13 +629,15 @@ export default function WorkhubDashboardDB({
   const canEditSelected = selectedTask ? canEditTask(actor, selectedTask) : false
   const canProgressSelected = selectedTask ? canProgressTask(actor, selectedTask) : false
 
-  const navItems: { label: View; icon: typeof LayoutDashboard; count?: number; group: string }[] = [
+  const navItems: { label: View; displayLabel?: string; icon: typeof LayoutDashboard; count?: number; group: string }[] = [
     ...(isManagement
       ? [{ label: 'Home' as const, icon: Home, group: 'Lead' }]
       : [{ label: 'Overview' as const, icon: LayoutDashboard, group: 'Workspace' }]),
     { label: 'My tasks', icon: Check, count: myTaskCount, group: isManagement ? 'Work' : 'Workspace' },
     { label: 'Responsibilities', icon: ShieldCheck, group: isManagement ? 'Work' : 'Workspace' },
-    ...(canViewDepartments ? [{ label: 'Departments' as const, icon: UsersRound, group: 'Delivery' }] : []),
+    ...(canViewDepartments
+      ? [{ label: 'Departments' as const, displayLabel: departmentCopy.navLabel, icon: UsersRound, group: 'Delivery' }]
+      : []),
     ...(canViewProjects ? [{ label: 'Projects' as const, icon: BriefcaseBusiness, group: 'Delivery' }] : []),
     ...(canViewReports ? [{ label: 'Reports' as const, icon: FileText, group: isManagement ? 'Lead' : 'Delivery' }] : []),
     { label: 'Activity', icon: Activity, group: isManagement ? 'Work' : 'Workspace' },
@@ -634,7 +645,7 @@ export default function WorkhubDashboardDB({
   ]
 
   const allowedViews = new Set(navItems.map((item) => item.label))
-  const defaultLandingView: View = isManagement ? 'Home' : canViewDepartments ? 'Departments' : 'My tasks'
+  const defaultLandingView: View = isManagement ? 'Home' : isDepartmentLeader ? 'Departments' : 'My tasks'
   const activeNav = resolveWorkspaceView(
     searchParams.get('view') ?? initialView,
     allowedViews,
@@ -642,7 +653,9 @@ export default function WorkhubDashboardDB({
     isManagement,
   )
   const selectedProjectId = searchParams.get('project')
-  const selectedDepartmentId = searchParams.get('department')
+  // Single-department viewers never browse a set, so their own department is always
+  // the selection and the `?department=` param is irrelevant to them.
+  const selectedDepartmentId = showsDepartmentGrid ? searchParams.get('department') : currentUserDepartmentId
   const allWorkScope = searchParams.get('scope') === 'all'
   const deadlineFilter = parseDeadlineFilter(searchParams.get('deadline'))
   const filter = parseTaskFilter(searchParams.get('status'))
@@ -794,6 +807,36 @@ export default function WorkhubDashboardDB({
         return !isArchived && matchesStatus && matchesOwner
       }),
     [projects, projectStatusFilter, employeeFilter, people],
+  )
+
+  const departmentPeople = useMemo(
+    () => (selectedDepartmentId ? people.filter((person) => person.department?.id === selectedDepartmentId) : []),
+    [people, selectedDepartmentId],
+  )
+  const departmentProjects = useMemo(
+    () =>
+      selectedDepartmentId
+        ? projects.filter(
+            (project) =>
+              project.projectStatus !== 'archived' &&
+              (project.departmentId === selectedDepartmentId ||
+                project.contributingDepartments?.some((entry) => entry.id === selectedDepartmentId)),
+          )
+        : [],
+    [projects, selectedDepartmentId],
+  )
+  const departmentStandaloneTasks = useMemo(
+    () =>
+      selectedDepartmentId
+        ? tasks.filter(
+            (task) =>
+              !task.projectId &&
+              task.department?.id === selectedDepartmentId &&
+              task.status !== 'completed' &&
+              task.status !== 'cancelled',
+          )
+        : [],
+    [tasks, selectedDepartmentId],
   )
 
   function handleComplete(taskId: string) {
@@ -1644,10 +1687,10 @@ export default function WorkhubDashboardDB({
 
   const commandResults = [
     ...navItems
-      .filter((item) => !commandQuery || item.label.toLowerCase().includes(commandQuery))
+      .filter((item) => !commandQuery || (item.displayLabel ?? item.label).toLowerCase().includes(commandQuery))
       .map((item) => ({
         id: `view-${item.label}`,
-        label: item.label,
+        label: item.displayLabel ?? item.label,
         hint: 'Workspace view',
         onSelect: () => nav(item.label),
       })),
@@ -1700,7 +1743,9 @@ export default function WorkhubDashboardDB({
       : []),
   ]
 
-  const taskFilterBar = (activeNav === 'My tasks' || activeNav === 'Overview' || activeNav === 'Departments') && (
+  // Not on Departments: the drawer scopes work itself, and a second department
+  // selector there would fight the drilled-in department and silently empty the list.
+  const taskFilterBar = (activeNav === 'My tasks' || activeNav === 'Overview') && (
     <div className="filter-toolbar">
       <label>
         Department
@@ -1863,7 +1908,13 @@ export default function WorkhubDashboardDB({
       currentAvatarUrl={currentUser?.avatarUrl}
       currentAvatarColor={currentUser?.avatarColor}
       companyName={companyName}
-      breadcrumb={activeNav}
+      breadcrumb={
+        activeNav === 'Departments'
+          ? selectedDepartment && showsDepartmentGrid
+            ? `${departmentCopy.breadcrumb} / ${selectedDepartment.name}`
+            : departmentCopy.breadcrumb
+          : activeNav
+      }
       profileNavActive={false}
       onOpenProfile={() => {
         setMobileOpen(false)
@@ -2211,120 +2262,129 @@ export default function WorkhubDashboardDB({
           {activeNav === 'Departments' && (
             <>
               <ViewHeading
-                eyebrow="Organization structure"
-                title="Departments & teams"
-                description="Monitor leadership, people, and progress across GCS."
+                eyebrow={departmentCopy.eyebrow}
+                title={departmentCopy.title}
+                description={departmentCopy.description}
                 action={canInvitePeople ? () => setShowInvite(true) : undefined}
                 actionLabel="Add person"
               />
-              {selectedDepartment && (
-                <div className="drill-banner">
-                  <button type="button" className="text-back" onClick={() => nav('Departments')}>Back to all departments</button>
-                  <strong>{selectedDepartment.name}</strong>
-                  <span>{ledBy(selectedDepartment.owner ? fullName(selectedDepartment.owner) : null)}</span>
-                </div>
-              )}
-              <div className="department-grid">
-                {initialDepartments.map((department) => (
-                  <article
-                    className={`panel department-card${selectedDepartmentId === department.id ? ' is-selected' : ''}`}
-                    key={department.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => nav('Departments', { department: department.id })}
-                    onKeyDown={(event) => event.key === 'Enter' && nav('Departments', { department: department.id })}
-                  >
-                    <div className={`department-icon department-${department.color}`}>{department.name.slice(0, 1)}</div>
-                    <div className="department-card-heading">
-                      <div>
-                        <h2>{department.name}</h2>
-                        <p>{ledBy(department.owner ? fullName(department.owner) : null)}</p>
-                      </div>
-                    </div>
-                    <div className="department-stat"><strong>{department.progress}%</strong><span>completion rate</span></div>
-                    <div className="progress-track">
-                      <div className={`progress-fill fill-${department.color}`} style={{ width: `${department.progress}%` }} />
-                    </div>
-                    <div className="department-meta">
-                      <span>{department.completed} / {department.total} tasks</span>
-                      <span>{department.teams?.length ?? 0} teams</span>
-                    </div>
-                  </article>
-                ))}
-              </div>
-              {selectedDepartment && (
+
+              {showsDepartmentGrid ? (
                 <>
-                  <section className="panel" style={{ marginTop: 18 }}>
+                  <div className="department-grid">
+                    {initialDepartments.map((department) => (
+                      <article
+                        className={`panel department-card${selectedDepartmentId === department.id ? ' is-selected' : ''}`}
+                        key={department.id}
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={selectedDepartmentId === department.id}
+                        aria-label={`Open ${department.name} details`}
+                        onClick={() => nav('Departments', { department: department.id })}
+                        onKeyDown={(event) => {
+                          if (event.key !== 'Enter' && event.key !== ' ') return
+                          event.preventDefault()
+                          nav('Departments', { department: department.id })
+                        }}
+                      >
+                        <div className={`department-icon department-${department.color}`}>{department.name.slice(0, 1)}</div>
+                        <div className="department-card-heading">
+                          <div>
+                            <h2>{department.name}</h2>
+                            <p>{ledBy(department.owner ? fullName(department.owner) : null)}</p>
+                          </div>
+                          <StatusBadge status={departmentHealth(department)} />
+                        </div>
+                        <div className="department-stat"><strong>{department.progress}%</strong><span>completion rate</span></div>
+                        <div className="progress-track">
+                          <div className={`progress-fill fill-${department.color}`} style={{ width: `${department.progress}%` }} />
+                        </div>
+                        <div className="department-meta">
+                          <span>{department.completed} / {department.total} tasks</span>
+                          <span>{department.teams?.length ?? 0} teams</span>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+
+                  <section className="panel table-panel">
                     <div className="panel-heading">
-                      <div>
-                        <h2>Projects in this function</h2>
-                        <p>Home projects and work this department contributes to.</p>
-                      </div>
-                    </div>
-                    <div className="project-grid" style={{ marginTop: 12 }}>
-                      {projects
-                        .filter(
-                          (project) =>
-                            project.departmentId === selectedDepartment.id ||
-                            project.contributingDepartments?.some((entry) => entry.id === selectedDepartment.id),
-                        )
-                        .map((project) => (
-                          <ProjectCard key={project.id} {...project} onOpen={() => nav('Projects', { project: project.id })} />
-                        ))}
-                    </div>
-                    {projects.filter(
-                      (project) =>
-                        project.departmentId === selectedDepartment.id ||
-                        project.contributingDepartments?.some((entry) => entry.id === selectedDepartment.id),
-                    ).length === 0 && <p className="empty-state">No projects for this department yet.</p>}
-                  </section>
-                  {taskFilterBar}
-                  {renderTasks(`${selectedDepartment.name} standalone tasks`, 'Work that is not sitting under a project')}
-                </>
-              )}
-              <section className="panel table-panel">
-                <div className="panel-heading">
-                  <div><h2>Reporting hierarchy</h2><p>Employees, roles, and manager assignments</p></div>
-                  {canInvitePeople && (
-                    <Button variant="outline" onClick={() => setShowInvite(true)}>
-                      <Plus data-icon="inline-start" /> Add person
-                    </Button>
-                  )}
-                </div>
-                <div className="employee-list">
-                  {people
-                    .filter((employee) =>
-                      (!selectedDepartmentId || employee.department?.id === selectedDepartmentId) &&
-                      (employeeFilter === 'all' || employee.id === employeeFilter),
-                    )
-                    .map((employee) => (
-                    <div className="employee-row" key={employee.id}>
-                      <UserAvatar
-                        initials={employee.initials}
-                        url={employee.avatarUrl}
-                        color={employee.avatarColor}
-                      />
-                      <div className="employee-main">
-                        <strong>{fullName(employee)}</strong>
-                        <span>{employee.jobTitle}</span>
-                      </div>
-                      <span>{employee.department?.name ?? '—'}</span>
-                      <span>{employee.manager ? `Reports to ${fullName(employee.manager)}` : '—'}</span>
-                      <StatusBadge status={employee.status === 'active' ? 'Active' : 'Inactive'} />
-                      {canManagePeople && (
-                        <button
-                          className="filter-pill"
-                          style={{ fontSize: 9, padding: '4px 8px' }}
-                          disabled={isPending}
-                          onClick={() => handleToggleUserStatus(employee.id)}
-                        >
-                          {employee.status === 'active' ? 'Deactivate' : 'Activate'}
-                        </button>
+                      <div><h2>Reporting hierarchy</h2><p>Employees, roles, and manager assignments</p></div>
+                      {canInvitePeople && (
+                        <Button variant="outline" onClick={() => setShowInvite(true)}>
+                          <Plus data-icon="inline-start" /> Add person
+                        </Button>
                       )}
                     </div>
-                  ))}
-                </div>
-              </section>
+                    <div className="employee-list">
+                      {people
+                        .filter((employee) => employeeFilter === 'all' || employee.id === employeeFilter)
+                        .map((employee) => (
+                        <div className="employee-row" key={employee.id}>
+                          <UserAvatar
+                            initials={employee.initials}
+                            url={employee.avatarUrl}
+                            color={employee.avatarColor}
+                          />
+                          <div className="employee-main">
+                            <strong>{fullName(employee)}</strong>
+                            <span>{employee.jobTitle}</span>
+                          </div>
+                          <span>{employee.department?.name ?? '—'}</span>
+                          <span>{employee.manager ? `Reports to ${fullName(employee.manager)}` : '—'}</span>
+                          <StatusBadge status={employee.status === 'active' ? 'Active' : 'Inactive'} />
+                          {canManagePeople && (
+                            <button
+                              className="filter-pill"
+                              style={{ fontSize: 9, padding: '4px 8px' }}
+                              disabled={isPending}
+                              onClick={() => handleToggleUserStatus(employee.id)}
+                            >
+                              {employee.status === 'active' ? 'Deactivate' : 'Activate'}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </>
+              ) : selectedDepartment ? (
+                <section className="panel dept-inline">
+                  <div className="dept-inline-head">
+                    <div className={`department-icon department-${selectedDepartment.color}`}>
+                      {selectedDepartment.name.slice(0, 1)}
+                    </div>
+                    <div className="dept-drawer-title">
+                      <h2>{selectedDepartment.name}</h2>
+                      <p>
+                        {ledBy(selectedDepartment.owner ? fullName(selectedDepartment.owner) : null)}
+                        {selectedDepartment.teams?.length ? ` · ${selectedDepartment.teams.length} teams` : ''}
+                      </p>
+                    </div>
+                    <StatusBadge status={departmentHealth(selectedDepartment)} />
+                  </div>
+                  <DepartmentDetailBody
+                    key={selectedDepartment.id}
+                    department={selectedDepartment}
+                    posture={posture}
+                    people={departmentPeople}
+                    projects={departmentProjects}
+                    tasks={departmentStandaloneTasks}
+                    onOpenProject={canViewProjects ? (id) => nav('Projects', { project: id }) : undefined}
+                    onOpenTask={(id) => {
+                      const task = tasks.find((entry) => entry.id === id)
+                      if (task) setSelectedTask(task)
+                    }}
+                    onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
+                    onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
+                    busy={isPending}
+                  />
+                </section>
+              ) : (
+                <p className="empty-state">
+                  You have not been assigned to a department yet. Ask your administrator to add you to one.
+                </p>
+              )}
             </>
           )}
 
@@ -2647,6 +2707,26 @@ export default function WorkhubDashboardDB({
             </>
           )}
         </div>
+
+      {activeNav === 'Departments' && showsDepartmentGrid && selectedDepartment && (
+        <DepartmentDrawer
+          key={selectedDepartment.id}
+          department={selectedDepartment}
+          posture={posture}
+          people={departmentPeople}
+          projects={departmentProjects}
+          tasks={departmentStandaloneTasks}
+          onClose={() => nav('Departments')}
+          onOpenProject={canViewProjects ? (id) => nav('Projects', { project: id }) : undefined}
+          onOpenTask={(id) => {
+            const task = tasks.find((entry) => entry.id === id)
+            if (task) setSelectedTask(task)
+          }}
+          onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
+          onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
+          busy={isPending}
+        />
+      )}
 
       {selectedTask && (
         <TaskDetailSheet

@@ -179,6 +179,8 @@ export async function listDepartments(viewer?: CurrentUser | null) {
       total: sql<number>`count(*)::int`,
       completed: sql<number>`count(*) filter (where ${tasks.status} = 'completed')::int`,
       active: sql<number>`count(*) filter (where ${tasks.status} not in ('completed', 'cancelled'))::int`,
+      blocked: sql<number>`count(*) filter (where ${tasks.status} in ('blocked', 'pending_approval'))::int`,
+      overdue: sql<number>`count(*) filter (where ${tasks.dueDate} < current_date and ${tasks.status} not in ('completed', 'cancelled'))::int`,
     })
     .from(tasks)
     .groupBy(tasks.departmentId)
@@ -191,8 +193,10 @@ export async function listDepartments(viewer?: CurrentUser | null) {
     const total = stat?.total ?? 0
     const completed = stat?.completed ?? 0
     const active = stat?.active ?? 0
+    const blocked = stat?.blocked ?? 0
+    const overdue = stat?.overdue ?? 0
     const progress = total === 0 ? 0 : Math.round((completed / total) * 100)
-    return { ...department, total, completed, active, progress }
+    return { ...department, total, completed, active, blocked, overdue, progress }
   })
 
   if (!viewer) return []

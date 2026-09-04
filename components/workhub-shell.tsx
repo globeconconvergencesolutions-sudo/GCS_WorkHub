@@ -25,6 +25,8 @@ import type { WorkspaceView } from '@/lib/workspace-nav'
 
 type NavItem = {
   label: WorkspaceView
+  /** What the viewer sees. `label` stays the routing key so URLs are role-independent. */
+  displayLabel?: string
   icon: ComponentType<{ 'aria-hidden'?: boolean }>
   count?: number
   group: string
@@ -197,22 +199,25 @@ export function WorkhubShell({
           )}
           <div className={`nav-group-body${groupOpen ? ' is-open' : ''}`}>
             <div className="nav-group-inner">
-              {items.map(({ label, icon: Icon, count }) => (
-                <button
-                  key={label}
-                  type="button"
-                  className={activeNav === label ? 'nav-item active' : 'nav-item'}
-                  data-label={label}
-                  title={label}
-                  aria-label={typeof count === 'number' && count > 0 ? `${label}, ${count} items` : label}
-                  aria-current={activeNav === label ? 'page' : undefined}
-                  onClick={() => onPick(label)}
-                >
-                  <Icon aria-hidden={true} />
-                  <span>{label}</span>
-                  {typeof count === 'number' && count > 0 && <em>{count > 9 ? '9+' : count}</em>}
-                </button>
-              ))}
+              {items.map(({ label, displayLabel, icon: Icon, count }) => {
+                const text = displayLabel ?? label
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    className={activeNav === label ? 'nav-item active' : 'nav-item'}
+                    data-label={text}
+                    title={text}
+                    aria-label={typeof count === 'number' && count > 0 ? `${text}, ${count} items` : text}
+                    aria-current={activeNav === label ? 'page' : undefined}
+                    onClick={() => onPick(label)}
+                  >
+                    <Icon aria-hidden={true} />
+                    <span>{text}</span>
+                    {typeof count === 'number' && count > 0 && <em>{count > 9 ? '9+' : count}</em>}
+                  </button>
+                )
+              })}
             </div>
           </div>
         </div>
