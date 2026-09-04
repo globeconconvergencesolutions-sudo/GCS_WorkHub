@@ -49,3 +49,15 @@ export function getInviteStarterPassword() {
   }
   return 'Workhub123!'
 }
+
+export function getGmailUser() {
+  return readEnv('GMAIL_USER')
+}
+
+export function getGmailAppPassword() {
+  return readEnv('GMAIL_APP_PASSWORD')?.replace(/\s+/g, '')
+}
+
+export function getMailFromName() {
+  return readEnv('GMAIL_FROM_NAME') ?? 'GCS WorkHub'
+}

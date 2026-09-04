@@ -9,7 +9,6 @@ import {
   canDeactivateUser,
   canDeleteTask,
   canEditTask,
-  canInvite,
   canManageOrg,
   canManageProject,
   canProgressTask,
@@ -20,11 +19,9 @@ import {
   canViewCompanyReports,
   canViewDepartmentReports,
   denied,
-  isDepartmentHead,
   isDepartmentLeader,
   isManagement,
 } from '@/lib/auth/permissions'
-import { getInviteStarterPassword } from '@/lib/env'
 import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
@@ -2113,8 +2110,18 @@ export async function toggleUserStatus(userId: string) {
     return denied('You are not allowed to change this person’s status.')
   }
 
-  const newStatus = target.status === 'active' ? 'inactive' : 'active'
-  await getDb().update(users).set({ status: newStatus }).where(eq(users.id, userId))
+  const newStatus =
+    target.status === 'active' || target.status === 'invited' ? 'inactive' : 'active'
+  if (newStatus === 'active' && !target.passwordHash) {
+    return { error: 'This person has not set a password yet. Resend their invite instead.' }
+  }
+  await getDb()
+    .update(users)
+    .set({
+      status: newStatus,
+      ...(target.status === 'invited' ? { mustChangePassword: false } : {}),
+    })
+    .where(eq(users.id, userId))
   if (newStatus === 'inactive') {
     await revokeAuthSessions(userId)
   }
@@ -2358,7 +2365,10 @@ export async function changeOwnPassword(input: {
   if (same) return { error: 'Choose a password that is different from the current one.' }
 
   const passwordHash = await bcrypt.hash(nextPassword, 10)
-  await getDb().update(users).set({ passwordHash }).where(eq(users.id, currentUser.id))
+  await getDb()
+    .update(users)
+    .set({ passwordHash, mustChangePassword: false })
+    .where(eq(users.id, currentUser.id))
   await provisionAuthIdentity({
     userId: currentUser.id,
     email: currentUser.email,
@@ -2579,82 +2589,6 @@ export async function sendWorkspaceReminder(input: { userId: string; message: st
 
   refreshWorkhub()
   return { ok: true }
-}
-
-export async function inviteEmployee(formData: FormData) {
-  const currentUser = await getCurrentUser()
-  if (!currentUser) return { error: 'Not signed in.' }
-
-  const firstName = String(formData.get('firstName') ?? '').trim()
-  const lastName = String(formData.get('lastName') ?? '').trim()
-  const email = String(formData.get('email') ?? '').trim().toLowerCase()
-  const jobTitle = String(formData.get('jobTitle') ?? '').trim()
-  let departmentId = String(formData.get('departmentId') ?? '') || null
-  const managerId = String(formData.get('managerId') ?? '') || null
-  const roleKey = String(formData.get('roleKey') ?? 'employee').trim() || 'employee'
-  if (isDepartmentHead(currentUser) && !isManagement(currentUser)) {
-    departmentId = currentUser.departmentId ?? null
-  }
-  if (!canInvite(currentUser, { roleKey, departmentId })) {
-    return denied('You are not allowed to add this person.')
-  }
-  if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
-    return { error: 'Assign a department for this role.' }
-  }
-
-  if (!firstName || !lastName) return { error: 'First and last name are required.' }
-  if (!email || !email.includes('@')) return { error: 'A valid work email is required.' }
-  if (!jobTitle) return { error: 'A job title is required.' }
-
-  const existing = await getUserByEmail(email)
-  if (existing) return { error: 'That email is already on WorkHub.' }
-
-  const company = await getCompany()
-  if (!company) return { error: 'Workspace is not ready yet.' }
-
-  const [role] = await getDb().select().from(roles).where(eq(roles.key, roleKey)).limit(1)
-  if (!role) return { error: 'Choose a valid role.' }
-
-  const initials = `${firstName[0] ?? ''}${lastName[0] ?? ''}`.toUpperCase() || 'G'
-  const starterPassword = getInviteStarterPassword()
-  const passwordHash = await bcrypt.hash(starterPassword, 10)
-
-  const [created] = await getDb()
-    .insert(users)
-    .values({
-      companyId: company.id,
-      departmentId,
-      managerId,
-      email,
-      firstName,
-      lastName,
-      jobTitle,
-      passwordHash,
-      initials,
-      status: 'active',
-    })
-    .returning()
-
-  await getDb().insert(userRoles).values({ userId: created.id, roleId: role.id })
-  await getDb().insert(notificationPreferences).values({ userId: created.id })
-  await provisionAuthIdentity({
-    userId: created.id,
-    email,
-    name: `${firstName} ${lastName}`,
-    passwordHash,
-  })
-
-  await getDb().insert(activityEvents).values({
-    companyId: company.id,
-    actorId: currentUser.id,
-    entityType: 'user',
-    entityId: created.id,
-    action: 'invited',
-    summary: `added ${firstName} ${lastName} to WorkHub`,
-  })
-
-  refreshWorkhub()
-  return { ok: true, starterPassword, email }
 }
 
 export async function exportReportCsv() {

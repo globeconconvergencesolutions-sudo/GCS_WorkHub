@@ -79,7 +79,10 @@ export async function getWorkspaceContext() {
 
 export async function listPeople(viewer?: CurrentUser | null) {
   const rows = await getDb().query.users.findMany({
-    where: viewer && isManagement(viewer) ? undefined : eq(users.status, 'active'),
+    where:
+      viewer && isManagement(viewer)
+        ? undefined
+        : or(eq(users.status, 'active'), eq(users.status, 'invited')),
     with: {
       department: true,
       manager: true,
@@ -92,12 +95,23 @@ export async function listPeople(viewer?: CurrentUser | null) {
   if (isDepartmentLeader(viewer) && viewer.departmentId) {
     return rows.filter((row) => row.departmentId === viewer.departmentId)
   }
-  return rows.filter((row) => row.id === viewer.id)
+  return rows.filter((row) => row.id === viewer.id && row.status === 'active')
 }
 
 export async function listDirectory(viewer?: CurrentUser | null) {
-  if (!viewer || !canCreateWork(viewer)) return listPeople(viewer)
-  if (isManagement(viewer)) return listPeople(viewer)
+  if (!viewer || !canCreateWork(viewer)) {
+    return (await listPeople(viewer)).filter((row) => row.status === 'active')
+  }
+  if (isManagement(viewer)) {
+    return getDb().query.users.findMany({
+      where: eq(users.status, 'active'),
+      with: {
+        department: true,
+        manager: true,
+      },
+      orderBy: [asc(users.firstName), asc(users.lastName)],
+    })
+  }
 
   return getDb().query.users.findMany({
     where: eq(users.status, 'active'),

@@ -70,6 +70,10 @@ export async function authenticate(
 
   await getDb().update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, workhubUser.id))
 
+  if (workhubUser.mustChangePassword) {
+    redirect('/account/password')
+  }
+
   const roleKeys = workhubUser.roles?.map((entry) => entry.role.key) ?? []
   const redirectTo =
     callbackUrl !== '/' ? (safeInternalPath(callbackUrl) ?? getRoleLandingUrl(roleKeys)) : getRoleLandingUrl(roleKeys)

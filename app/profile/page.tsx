@@ -31,6 +31,7 @@ export default async function ProfilePage() {
   try {
     const currentUser = await getCurrentUser()
     if (!currentUser) redirect('/login?callbackUrl=/profile')
+    if (currentUser.mustChangePassword) redirect('/account/password')
 
     const [company, preferences, overview, notifications, unreadNotificationCount, projects] = await Promise.all([
       getCompany(),

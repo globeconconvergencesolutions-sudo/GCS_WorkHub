@@ -12,7 +12,8 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core'
 
-export const userStatusEnum = pgEnum('user_status', ['active', 'inactive'])
+export const userStatusEnum = pgEnum('user_status', ['active', 'inactive', 'invited'])
+export const userInvitePurposeEnum = pgEnum('user_invite_purpose', ['setup', 'password_reset'])
 export const taskStatusEnum = pgEnum('task_status', [
   'not_started',
   'in_progress',
@@ -150,6 +151,7 @@ export const users = pgTable(
     lastName: text('last_name').notNull(),
     jobTitle: text('job_title').notNull(),
     passwordHash: text('password_hash'),
+    mustChangePassword: boolean('must_change_password').notNull().default(false),
     initials: text('initials').notNull(),
     avatarColor: text('avatar_color').notNull().default('teal'),
     avatarUrl: text('avatar_url'),
@@ -161,6 +163,28 @@ export const users = pgTable(
   (table) => [
     index('users_department_idx').on(table.departmentId),
     index('users_manager_idx').on(table.managerId),
+  ],
+)
+
+export const userInvites = pgTable(
+  'user_invites',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    invitedById: uuid('invited_by_id').references(() => users.id, { onDelete: 'set null' }),
+    purpose: userInvitePurposeEnum('purpose').notNull().default('setup'),
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    lastSentAt: timestamp('last_sent_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('user_invites_token_hash_uidx').on(table.tokenHash),
+    index('user_invites_user_idx').on(table.userId),
+    index('user_invites_expires_idx').on(table.expiresAt),
   ],
 )
 
@@ -527,6 +551,20 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   }),
   managementRequestsCreated: many(managementRequests, { relationName: 'requestor' }),
   managementRequestsAssigned: many(managementRequests, { relationName: 'assignee' }),
+  invites: many(userInvites, { relationName: 'invitee' }),
+}))
+
+export const userInvitesRelations = relations(userInvites, ({ one }) => ({
+  user: one(users, {
+    fields: [userInvites.userId],
+    references: [users.id],
+    relationName: 'invitee',
+  }),
+  invitedBy: one(users, {
+    fields: [userInvites.invitedById],
+    references: [users.id],
+    relationName: 'inviter',
+  }),
 }))
 
 export const rolesRelations = relations(roles, ({ many }) => ({

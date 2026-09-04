@@ -64,6 +64,8 @@ type DepartmentDetailProps = {
   onOpenTask?: (taskId: string) => void
   onInvite?: () => void
   onToggleStatus?: (personId: string) => void
+  onResendInvite?: (personId: string) => void
+  onCancelInvite?: (personId: string) => void
   busy?: boolean
 }
 
@@ -121,6 +123,8 @@ export function DepartmentDetailBody({
   onOpenTask,
   onInvite,
   onToggleStatus,
+  onResendInvite,
+  onCancelInvite,
   busy = false,
 }: DepartmentDetailProps) {
   const [showAllPeople, setShowAllPeople] = useState(false)
@@ -196,8 +200,25 @@ export function DepartmentDetailBody({
                     {canSeeReportingLines && person.manager ? ` · reports to ${fullName(person.manager)}` : ''}
                   </span>
                 </div>
-                <StatusBadge status={person.status === 'inactive' ? 'Inactive' : 'Active'} />
-                {onToggleStatus ? (
+                <StatusBadge
+                  status={
+                    person.status === 'invited' ? 'Invited' : person.status === 'inactive' ? 'Inactive' : 'Active'
+                  }
+                />
+                {person.status === 'invited' && (onResendInvite || onCancelInvite) ? (
+                  <div className="dept-person-actions">
+                    {onResendInvite ? (
+                      <button type="button" className="row-action" disabled={busy} onClick={() => onResendInvite(person.id)}>
+                        Resend
+                      </button>
+                    ) : null}
+                    {onCancelInvite ? (
+                      <button type="button" className="row-action row-action-danger" disabled={busy} onClick={() => onCancelInvite(person.id)}>
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                ) : onToggleStatus && person.status !== 'invited' ? (
                   <button
                     type="button"
                     className="row-action"

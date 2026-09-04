@@ -1,6 +1,7 @@
 'use client'
 
 import { useActionState, useState, useSyncExternalStore, type FormEvent } from 'react'
+import Link from 'next/link'
 import { Eye, EyeOff, Loader2, Lock, Mail, ShieldCheck } from 'lucide-react'
 import { authenticate, type LoginActionState } from '@/app/login/actions'
 
@@ -66,13 +67,9 @@ export function LoginForm({ callbackUrl }: { callbackUrl: string }) {
           <label htmlFor="password" className="block text-sm font-medium text-slate-200">
             Password
           </label>
-          <button
-            className="text-xs text-slate-400 transition-colors hover:text-slate-200"
-            type="button"
-            onClick={() => setNotice('Password recovery is handled by your WorkHub administrator.')}
-          >
+          <Link href="/forgot-password" className="text-xs text-slate-400 transition-colors hover:text-slate-200">
             Forgot password?
-          </button>
+          </Link>
         </div>
         <div className="relative">
           <Lock className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-500" aria-hidden="true" />

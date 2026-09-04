@@ -99,6 +99,8 @@ import {
   updateTaskStatus,
   setTaskPlacement,
 } from '@/app/actions'
+import { cancelInvite, resendInvite } from '@/app/invite-actions'
+import { RemovePersonDialog } from '@/components/remove-person-dialog'
 import type { Person } from '@/lib/types'
 import { taskCategoryEnum, taskPriorityEnum, taskStatusEnum } from '@/lib/db/schema'
 
@@ -556,6 +558,7 @@ export default function WorkhubDashboardDB({
   const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null)
   const [dependencyBlockingTaskId, setDependencyBlockingTaskId] = useState('')
   const [deleteTaskConfirm, setDeleteTaskConfirm] = useState<{ id: string; title: string } | null>(null)
+  const [removePersonTarget, setRemovePersonTarget] = useState<Employee | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [approvalReason, setApprovalReason] = useState('')
   const [approvalError, setApprovalError] = useState<string | null>(null)
@@ -1438,6 +1441,20 @@ export default function WorkhubDashboardDB({
   function handleToggleUserStatus(userId: string) {
     startTransition(async () => {
       await toggleUserStatus(userId)
+      router.refresh()
+    })
+  }
+
+  function handleResendInvite(userId: string) {
+    startTransition(async () => {
+      await resendInvite(userId)
+      router.refresh()
+    })
+  }
+
+  function handleCancelInvite(userId: string) {
+    startTransition(async () => {
+      await cancelInvite(userId)
       router.refresh()
     })
   }
@@ -2332,17 +2349,57 @@ export default function WorkhubDashboardDB({
                           </div>
                           <span>{employee.department?.name ?? '—'}</span>
                           <span>{employee.manager ? `Reports to ${fullName(employee.manager)}` : '—'}</span>
-                          <StatusBadge status={employee.status === 'active' ? 'Active' : 'Inactive'} />
-                          {canManagePeople && (
-                            <button
-                              className="filter-pill"
-                              style={{ fontSize: 9, padding: '4px 8px' }}
-                              disabled={isPending}
-                              onClick={() => handleToggleUserStatus(employee.id)}
-                            >
-                              {employee.status === 'active' ? 'Deactivate' : 'Activate'}
-                            </button>
-                          )}
+                          <StatusBadge
+                            status={
+                              employee.status === 'active'
+                                ? 'Active'
+                                : employee.status === 'invited'
+                                  ? 'Invited'
+                                  : 'Inactive'
+                            }
+                          />
+                          <div className="employee-actions">
+                            {canInvitePeople && employee.status === 'invited' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="row-action"
+                                  disabled={isPending}
+                                  onClick={() => handleResendInvite(employee.id)}
+                                >
+                                  Resend invite
+                                </button>
+                                <button
+                                  type="button"
+                                  className="row-action row-action-danger"
+                                  disabled={isPending}
+                                  onClick={() => handleCancelInvite(employee.id)}
+                                >
+                                  Cancel invite
+                                </button>
+                              </>
+                            ) : null}
+                            {canManagePeople && employee.status === 'active' ? (
+                              <button
+                                type="button"
+                                className="row-action row-action-danger"
+                                disabled={isPending || employee.id === currentUserId}
+                                onClick={() => setRemovePersonTarget(employee)}
+                              >
+                                Remove
+                              </button>
+                            ) : null}
+                            {canManagePeople && employee.status !== 'invited' ? (
+                              <button
+                                className="filter-pill"
+                                style={{ fontSize: 9, padding: '4px 8px' }}
+                                disabled={isPending}
+                                onClick={() => handleToggleUserStatus(employee.id)}
+                              >
+                                {employee.status === 'active' ? 'Deactivate' : 'Activate'}
+                              </button>
+                            ) : null}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2377,6 +2434,8 @@ export default function WorkhubDashboardDB({
                     }}
                     onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
                     onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
+                    onResendInvite={canInvitePeople ? handleResendInvite : undefined}
+                    onCancelInvite={canInvitePeople ? handleCancelInvite : undefined}
                     busy={isPending}
                   />
                 </section>
@@ -2724,6 +2783,8 @@ export default function WorkhubDashboardDB({
           }}
           onInvite={canInvitePeople ? () => setShowInvite(true) : undefined}
           onToggleStatus={canManagePeople ? handleToggleUserStatus : undefined}
+          onResendInvite={canInvitePeople ? handleResendInvite : undefined}
+          onCancelInvite={canInvitePeople ? handleCancelInvite : undefined}
           busy={isPending}
         />
       )}
@@ -2895,10 +2956,19 @@ export default function WorkhubDashboardDB({
           departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
           roles={inviteRoles.length > 0 ? inviteRoles : workspaceRoles}
           lockDepartmentId={!isManagement && isDepartmentLeader ? currentUser?.departmentId ?? null : null}
+          defaultDepartmentId={selectedDepartmentId}
           onClose={() => {
             setShowInvite(false)
             router.refresh()
           }}
+        />
+      )}
+      {canManagePeople && removePersonTarget && (
+        <RemovePersonDialog
+          person={removePersonTarget}
+          people={activePeople}
+          onClose={() => setRemovePersonTarget(null)}
+          onRemoved={() => router.refresh()}
         />
       )}
     </WorkhubShell>

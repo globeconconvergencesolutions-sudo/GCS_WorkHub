@@ -32,6 +32,9 @@ export default async function Page({
     if (!currentUser) {
       redirect('/login')
     }
+    if (currentUser.mustChangePassword) {
+      redirect('/account/password')
+    }
 
     const [dashboardData, settings] = await Promise.all([
       getDashboardData(currentUser),
