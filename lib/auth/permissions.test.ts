@@ -98,6 +98,10 @@ assert(canInvite(head, { roleKey: 'employee', departmentId: 'dept-1' }), 'head c
 assert(!canInvite(head, { roleKey: 'employee', departmentId: 'dept-2' }), 'head cannot invite other depts')
 assert(!canInvite(manager, { roleKey: 'employee', departmentId: 'dept-1' }), 'manager cannot invite')
 assert(inviteableRoleKeys(admin).includes('admin'), 'admin can grant admin')
+assert(inviteableRoleKeys(admin).includes('volunteer'), 'admin can grant volunteer')
+assert(canInvite(md, { roleKey: 'volunteer', departmentId: 'dept-1' }), 'md can invite volunteer')
+assert(canInvite(head, { roleKey: 'volunteer', departmentId: 'dept-1' }), 'head can invite volunteer into own dept')
+assert(!canInvite(head, { roleKey: 'volunteer', departmentId: 'dept-2' }), 'head cannot invite volunteer other depts')
 
 assert(canSubmitLeadershipRequest(head) && !canSubmitLeadershipRequest(employee), 'leadership requests')
 assert(canSubmitWorkRequest(employee) && !canSubmitWorkRequest(head), 'employees request work')

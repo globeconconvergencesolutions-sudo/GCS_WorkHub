@@ -100,6 +100,7 @@ import {
   setTaskPlacement,
 } from '@/app/actions'
 import { cancelInvite, resendInvite } from '@/app/invite-actions'
+import { CreateDepartmentDialog } from '@/components/create-department-dialog'
 import { RemovePersonDialog } from '@/components/remove-person-dialog'
 import { EditPersonDialog } from '@/components/edit-person-dialog'
 import type { Person } from '@/lib/types'
@@ -520,7 +521,7 @@ export default function WorkhubDashboardDB({
   unreadNotificationCount: number
   managementRequests: DbManagementRequest[]
   notificationPreferences: NotificationPreferences
-  workspaceRoles?: { key: string; name: string }[]
+  workspaceRoles?: { key: string; name: string; description?: string | null }[]
   workspaceTeams?: { id: string; name: string; departmentId?: string; department?: { name: string } | null }[]
   companyName?: string
 }) {
@@ -539,6 +540,7 @@ export default function WorkhubDashboardDB({
   const [mobileOpen, setMobileOpen] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
+  const [showCreateDepartment, setShowCreateDepartment] = useState(false)
   const [notificationRows, setNotificationRows] = useState(initialNotifications)
   const [unreadCount, setUnreadCount] = useState(unreadNotificationCount)
   const [managementRequestRows, setManagementRequestRows] = useState(initialManagementRequests)
@@ -2289,8 +2291,14 @@ export default function WorkhubDashboardDB({
                 eyebrow={departmentCopy.eyebrow}
                 title={departmentCopy.title}
                 description={departmentCopy.description}
-                action={canInvitePeople ? () => setShowInvite(true) : undefined}
-                actionLabel="Add person"
+                actions={[
+                  ...(canEditOrg
+                    ? [{ label: 'New department', onClick: () => setShowCreateDepartment(true), variant: 'outline' as const }]
+                    : []),
+                  ...(canInvitePeople
+                    ? [{ label: 'Add person', onClick: () => setShowInvite(true), variant: 'primary' as const }]
+                    : []),
+                ]}
               />
 
               {showsDepartmentGrid ? (
@@ -2732,15 +2740,21 @@ export default function WorkhubDashboardDB({
               <div className="dashboard-grid">
                 <section className="panel">
                   <div className="panel-heading">
-                    <div><h2>Roles</h2><p>Access levels in this workspace</p></div>
+                    <div>
+                      <h2>Roles</h2>
+                      <p>Access desks in this workspace — Volunteer is for assigned support work</p>
+                    </div>
                   </div>
                   <div className="responsibility-list">
                     {workspaceRoles.map((role) => (
                       <div className="responsibility-row" key={role.key}>
                         <div className="responsibility-main">
                           <strong>{role.name}</strong>
-                          <span>{role.key.replaceAll('_', ' ')}</span>
+                          <span>
+                            {role.description?.trim() || role.key.replaceAll('_', ' ')}
+                          </span>
                         </div>
+                        <StatusBadge status={role.key === 'volunteer' ? 'Volunteer' : role.name} />
                       </div>
                     ))}
                   </div>
@@ -3038,6 +3052,16 @@ export default function WorkhubDashboardDB({
           onSaved={() => router.refresh()}
         />
       )}
+      {canEditOrg && showCreateDepartment && (
+        <CreateDepartmentDialog
+          people={activePeople}
+          onClose={() => setShowCreateDepartment(false)}
+          onCreated={(departmentId) => {
+            router.refresh()
+            if (departmentId) nav('Departments', { department: departmentId })
+          }}
+        />
+      )}
     </WorkhubShell>
   )
 }
@@ -3048,30 +3072,51 @@ function ViewHeading({
   description,
   action,
   actionLabel = 'Create task',
+  actions,
 }: {
   eyebrow: string
   title: string
   description: string
   action?: () => void
   actionLabel?: string
+  actions?: { label: string; onClick: () => void; variant?: 'primary' | 'outline' }[]
 }) {
+  const resolvedActions =
+    actions ??
+    (action
+      ? [{ label: actionLabel, onClick: action, variant: 'primary' as const }]
+      : [])
+
   return (
     <div className="welcome-row">
       <div>
         <p className="eyebrow">{eyebrow}</p>
-        <h1>{title}<span>.</span></h1>
+        <h1>
+          {title}
+          <span>.</span>
+        </h1>
         <p className="subhead">{description}</p>
       </div>
-      {action && (
-        <Button className="create-button" onClick={action}>
-          {actionLabel.toLowerCase().includes('download') ? (
-            <Download data-icon="inline-start" />
-          ) : (
-            <Plus data-icon="inline-start" />
-          )}{' '}
-          {actionLabel}
-        </Button>
-      )}
+      {resolvedActions.length > 0 ? (
+        <div className="welcome-actions">
+          {resolvedActions.map((entry) =>
+            entry.variant === 'outline' ? (
+              <Button key={entry.label} variant="outline" onClick={entry.onClick}>
+                <Plus data-icon="inline-start" /> {entry.label}
+              </Button>
+            ) : (
+              <Button key={entry.label} className="create-button" onClick={entry.onClick}>
+                {entry.label.toLowerCase().includes('download') ? (
+                  <Download data-icon="inline-start" />
+                ) : (
+                  <Plus data-icon="inline-start" />
+                )}{' '}
+                {entry.label}
+              </Button>
+            ),
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }

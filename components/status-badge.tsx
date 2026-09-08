@@ -15,6 +15,7 @@ function badgeClass(status: string) {
   if (normalized === 'home') return 'status-home'
   if (normalized === 'invited') return 'status-waiting'
   if (normalized === 'inactive') return 'status-cancelled'
+  if (normalized === 'volunteer') return 'status-volunteer'
   return normalized.startsWith('status-') ? normalized : `status-${normalized}`
 }
 

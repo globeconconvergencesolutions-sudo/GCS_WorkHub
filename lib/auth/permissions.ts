@@ -1,4 +1,10 @@
-export type RoleKey = 'admin' | 'managing_director' | 'department_head' | 'manager' | 'employee'
+export type RoleKey =
+  | 'admin'
+  | 'managing_director'
+  | 'department_head'
+  | 'manager'
+  | 'employee'
+  | 'volunteer'
 
 export type Actor = {
   id: string
@@ -39,6 +45,15 @@ export function isDepartmentLeader(user: Actor) {
   return isDepartmentHead(user) || isManager(user)
 }
 
+export function isVolunteer(user: Actor) {
+  return hasRole(user, ['volunteer'])
+}
+
+/** Staff desks that own assigned work but do not create company structure. */
+export function isIndividualContributor(user: Actor) {
+  return hasRole(user, ['employee', 'volunteer'])
+}
+
 export function canManageOrg(user: Actor) {
   return isAdmin(user)
 }
@@ -73,9 +88,11 @@ export function canSubmitWorkRequest(user: Actor) {
 
 export function inviteableRoleKeys(user: Actor): RoleKey[] {
   if (!user) return []
-  if (isAdmin(user)) return ['admin', 'managing_director', 'department_head', 'manager', 'employee']
-  if (isManagingDirector(user)) return ['department_head', 'manager', 'employee']
-  if (isDepartmentHead(user)) return ['manager', 'employee']
+  if (isAdmin(user)) {
+    return ['admin', 'managing_director', 'department_head', 'manager', 'employee', 'volunteer']
+  }
+  if (isManagingDirector(user)) return ['department_head', 'manager', 'employee', 'volunteer']
+  if (isDepartmentHead(user)) return ['manager', 'employee', 'volunteer']
   return []
 }
 

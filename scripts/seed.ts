@@ -52,6 +52,7 @@ function printLoginRoster() {
   console.log(`  Admin (org, people, grant any role)  ${ADMIN_EMAIL}  /  ${ADMIN_PASSWORD}`)
   console.log(`  MD (company cockpit, no org CRUD)    ${MD_EMAIL}  /  ${STAFF_PASSWORD}`)
   console.log(`  Department heads / staff             work emails  /  ${STAFF_PASSWORD}`)
+  console.log(`  Volunteer (Martha)                   martha@globeconcs.com  /  Workhub123!`)
 }
 
 async function syncPrivilegedAccounts() {
@@ -123,7 +124,102 @@ async function syncPrivilegedAccounts() {
     })
   }
 
+  await ensureVolunteerDesk(company.id)
   return true
+}
+
+async function ensureVolunteerDesk(companyId: string) {
+  const [volunteerRole] = await db.select().from(roles).where(eq(roles.key, 'volunteer')).limit(1)
+  let roleId = volunteerRole?.id
+  if (!volunteerRole) {
+    const [created] = await db
+      .insert(roles)
+      .values({
+        key: 'volunteer',
+        name: 'Volunteer',
+        description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+        rank: 15,
+      })
+      .returning()
+    roleId = created.id
+  } else {
+    await db
+      .update(roles)
+      .set({
+        name: 'Volunteer',
+        description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+        rank: 15,
+      })
+      .where(eq(roles.id, volunteerRole.id))
+  }
+
+  let [volDept] = await db.select().from(departments).where(eq(departments.slug, 'volunteers')).limit(1)
+  if (!volDept) {
+    const [created] = await db
+      .insert(departments)
+      .values({ companyId, name: 'Volunteers', slug: 'volunteers', color: 'purple' })
+      .returning()
+    volDept = created
+    await db.insert(teams).values({ departmentId: created.id, name: 'Volunteers Desk' })
+  }
+
+  const [desk] = await db.select().from(teams).where(eq(teams.departmentId, volDept.id)).limit(1)
+  if (!desk) {
+    await db.insert(teams).values({ departmentId: volDept.id, name: 'Volunteers Desk' })
+  }
+
+  const marthaEmail = 'martha@globeconcs.com'
+  const marthaHash = await bcrypt.hash('Workhub123!', 10)
+  const [deskTeam] = await db.select().from(teams).where(eq(teams.departmentId, volDept.id)).limit(1)
+  const [martha] = await db.select().from(users).where(eq(users.email, marthaEmail)).limit(1)
+  let marthaId = martha?.id
+  if (martha) {
+    await db
+      .update(users)
+      .set({
+        firstName: 'Martha',
+        lastName: 'Volunteer',
+        jobTitle: 'Volunteer',
+        initials: 'MV',
+        avatarColor: 'purple',
+        status: 'active',
+        passwordHash: marthaHash,
+        mustChangePassword: false,
+        departmentId: volDept.id,
+        teamId: deskTeam?.id ?? martha.teamId,
+      })
+      .where(eq(users.id, martha.id))
+  } else {
+    const [created] = await db
+      .insert(users)
+      .values({
+        companyId,
+        departmentId: volDept.id,
+        teamId: deskTeam?.id ?? null,
+        email: marthaEmail,
+        firstName: 'Martha',
+        lastName: 'Volunteer',
+        jobTitle: 'Volunteer',
+        passwordHash: marthaHash,
+        mustChangePassword: false,
+        initials: 'MV',
+        avatarColor: 'purple',
+        status: 'active',
+      })
+      .returning()
+    marthaId = created.id
+    await db.insert(notificationPreferences).values({ userId: created.id })
+  }
+
+  if (marthaId && roleId) {
+    await setPrimaryRole(marthaId, 'volunteer')
+    await provisionAuthIdentity({
+      userId: marthaId,
+      email: marthaEmail,
+      name: 'Martha Volunteer',
+      passwordHash: marthaHash,
+    })
+  }
 }
 
 async function seed() {
@@ -191,6 +287,7 @@ async function seed() {
       { key: 'department_head', name: 'Department Head', description: 'Owns a department and its delivery', rank: 80 },
       { key: 'manager', name: 'Manager', description: 'Leads a team and assigns work', rank: 60 },
       { key: 'employee', name: 'Employee', description: 'Owns assigned tasks and responsibilities', rank: 20 },
+      { key: 'volunteer', name: 'Volunteer', description: 'Supports GCS work with a focused volunteer desk — assigned tasks only', rank: 15 },
       { key: 'admin', name: 'Workspace Admin', description: 'Manages accounts and workspace settings', rank: 90 },
     ])
     .returning()
@@ -208,6 +305,7 @@ async function seed() {
       { companyId: company.id, name: 'MD', slug: 'md', color: 'navy' },
       { companyId: company.id, name: 'Interns', slug: 'interns', color: 'slate' },
       { companyId: company.id, name: 'Attachees', slug: 'attachees', color: 'purple' },
+      { companyId: company.id, name: 'Volunteers', slug: 'volunteers', color: 'purple' },
     ])
     .returning()
 
@@ -224,6 +322,7 @@ async function seed() {
       { departmentId: dept.md.id, name: 'Executive Office' },
       { departmentId: dept.interns.id, name: 'Intern Desk' },
       { departmentId: dept.attachees.id, name: 'Attachees Desk' },
+      { departmentId: dept.volunteers.id, name: 'Volunteers Desk' },
     ])
     .returning()
 

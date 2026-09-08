@@ -26,7 +26,7 @@ import {
 } from '@/lib/auth/permissions'
 import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
-import { getCompany, getCurrentUser, getUserByEmail, getUserById, listTasks } from '@/lib/db/queries'
+import { getCompany, getCurrentUser, getUserById, listTasks } from '@/lib/db/queries'
 import {
   ensureContributingDepartment,
   loadProjectAccess,
@@ -2668,10 +2668,43 @@ export async function createDepartment(formData: FormData) {
   let slug = slugify(String(formData.get('slug') ?? name))
   if (!slug) slug = `dept-${Date.now().toString(36)}`
 
+  const existing = await getDb()
+    .select({ id: departments.id })
+    .from(departments)
+    .where(and(eq(departments.companyId, company.id), eq(departments.slug, slug)))
+    .limit(1)
+  if (existing[0]) {
+    return { error: 'A department with a similar name already exists.' }
+  }
+
   const [created] = await getDb()
     .insert(departments)
     .values({ companyId: company.id, name, slug, color, ownerId })
     .returning()
+
+  await getDb().insert(teams).values({ departmentId: created.id, name: `${name} Desk` })
+
+  if (ownerId) {
+    const owner = await getUserById(ownerId)
+    if (owner) {
+      await getDb()
+        .update(users)
+        .set({ departmentId: created.id })
+        .where(eq(users.id, ownerId))
+      const ownerKeys = owner.roles?.map((entry) => entry.role.key) ?? []
+      const keepRole =
+        ownerKeys.includes('admin') ||
+        ownerKeys.includes('managing_director') ||
+        ownerKeys.includes('department_head')
+      if (!keepRole) {
+        const [headRole] = await getDb().select().from(roles).where(eq(roles.key, 'department_head')).limit(1)
+        if (headRole) {
+          await getDb().delete(userRoles).where(eq(userRoles.userId, ownerId))
+          await getDb().insert(userRoles).values({ userId: ownerId, roleId: headRole.id })
+        }
+      }
+    }
+  }
 
   await getDb().insert(activityEvents).values({
     companyId: company.id,
@@ -2682,7 +2715,7 @@ export async function createDepartment(formData: FormData) {
     summary: `created department ${name}`,
   })
   refreshWorkhub()
-  return { ok: true }
+  return { ok: true as const, departmentId: created.id }
 }
 
 export async function updateDepartment(formData: FormData) {

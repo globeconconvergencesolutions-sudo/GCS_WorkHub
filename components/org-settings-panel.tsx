@@ -38,12 +38,12 @@ export function OrgSettingsPanel({
       {notice && <p className="form-success">{notice}</p>}
       <div className="dashboard-grid">
         <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>New department</h2>
-              <p>Stand up a Globecon function</p>
-            </div>
-          </div>
+              <div className="panel-heading">
+                <div>
+                  <h2>New department</h2>
+                  <p>Stand up a Globecon function — also available from Departments</p>
+                </div>
+              </div>
           <form
             className="form-grid"
             onSubmit={(event) => {
