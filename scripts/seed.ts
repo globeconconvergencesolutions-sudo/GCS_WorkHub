@@ -1,5 +1,5 @@
 import { config } from 'dotenv'
-import { eq, ne, sql } from 'drizzle-orm'
+import { and, eq, ne, sql } from 'drizzle-orm'
 import { neon } from '@neondatabase/serverless'
 import bcrypt from 'bcryptjs'
 import { drizzle } from 'drizzle-orm/neon-http'
@@ -128,6 +128,30 @@ async function syncPrivilegedAccounts() {
   return true
 }
 
+async function defaultSponsorId(companyId: string, departmentOwnerId?: string | null) {
+  if (departmentOwnerId) return departmentOwnerId
+  try {
+    const mdRoleId = await roleIdByKey('managing_director')
+    const [mdLink] = await db.select().from(userRoles).where(eq(userRoles.roleId, mdRoleId)).limit(1)
+    if (mdLink) return mdLink.userId
+  } catch {
+    // role may be missing mid-seed
+  }
+  try {
+    const adminRoleId = await roleIdByKey('admin')
+    const [adminLink] = await db.select().from(userRoles).where(eq(userRoles.roleId, adminRoleId)).limit(1)
+    if (adminLink) return adminLink.userId
+  } catch {
+    // role may be missing mid-seed
+  }
+  const [anyone] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.companyId, companyId), ne(users.status, 'inactive')))
+    .limit(1)
+  return anyone?.id ?? null
+}
+
 async function ensureVolunteerDesk(companyId: string) {
   const [volunteerRole] = await db.select().from(roles).where(eq(roles.key, 'volunteer')).limit(1)
   let roleId = volunteerRole?.id
@@ -137,7 +161,7 @@ async function ensureVolunteerDesk(companyId: string) {
       .values({
         key: 'volunteer',
         name: 'Volunteer',
-        description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+        description: 'Sponsored contributor desk — can log own tasks; supervisor is notified',
         rank: 15,
       })
       .returning()
@@ -147,7 +171,7 @@ async function ensureVolunteerDesk(companyId: string) {
       .update(roles)
       .set({
         name: 'Volunteer',
-        description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+        description: 'Sponsored contributor desk — can log own tasks; supervisor is notified',
         rank: 15,
       })
       .where(eq(roles.id, volunteerRole.id))
@@ -187,15 +211,18 @@ async function ensureVolunteerDesk(companyId: string) {
         mustChangePassword: false,
         departmentId: volDept.id,
         teamId: deskTeam?.id ?? martha.teamId,
+        managerId: martha.managerId ?? (await defaultSponsorId(companyId, volDept.ownerId)),
       })
       .where(eq(users.id, martha.id))
   } else {
+    const sponsorId = await defaultSponsorId(companyId, volDept.ownerId)
     const [created] = await db
       .insert(users)
       .values({
         companyId,
         departmentId: volDept.id,
         teamId: deskTeam?.id ?? null,
+        managerId: sponsorId,
         email: marthaEmail,
         firstName: 'Martha',
         lastName: 'Volunteer',

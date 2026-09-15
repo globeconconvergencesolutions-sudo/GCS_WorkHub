@@ -5,6 +5,7 @@ import { useFormStatus } from 'react-dom'
 import { Check, Copy, KeyRound, Mail, X } from 'lucide-react'
 import { inviteEmployee } from '@/app/invite-actions'
 import { Button } from '@/components/ui/button'
+import { requiresSponsor, sponsoredDeskLabel } from '@/lib/auth/sponsored'
 import type { Person } from '@/lib/types'
 
 function SubmitButton({ mode }: { mode: 'email' | 'temp' }) {
@@ -29,7 +30,7 @@ export function InviteEmployeeDialog({
   onClose,
 }: {
   people: Person[]
-  departments: { id: string; name: string }[]
+  departments: { id: string; name: string; slug?: string }[]
   roles: { key: string; name: string }[]
   lockDepartmentId?: string | null
   defaultDepartmentId?: string | null
@@ -39,6 +40,10 @@ export function InviteEmployeeDialog({
   const [success, setSuccess] = useState<InviteSuccess | null>(null)
   const [credentialMode, setCredentialMode] = useState<'email' | 'temp'>('email')
   const [copied, setCopied] = useState(false)
+  const [roleKey, setRoleKey] = useState(
+    roles.some((role) => role.key === 'employee') ? 'employee' : roles[0]?.key ?? 'employee',
+  )
+  const [departmentId, setDepartmentId] = useState(lockDepartmentId ?? defaultDepartmentId ?? '')
   const panelRef = useRef<HTMLDivElement | null>(null)
   const firstFieldRef = useRef<HTMLInputElement | null>(null)
 
@@ -50,6 +55,9 @@ export function InviteEmployeeDialog({
       }),
     [people],
   )
+  const selectedDepartmentSlug = departments.find((department) => department.id === departmentId)?.slug ?? null
+  const sponsorRequired = requiresSponsor({ roleKey, departmentSlug: selectedDepartmentSlug })
+  const deskLabel = sponsoredDeskLabel({ roleKey, departmentSlug: selectedDepartmentSlug })
 
   useEffect(() => {
     const previous = document.body.style.overflow
@@ -205,7 +213,8 @@ export function InviteEmployeeDialog({
                   Department
                   <select
                     name="departmentId"
-                    defaultValue={lockDepartmentId ?? defaultDepartmentId ?? ''}
+                    value={departmentId}
+                    onChange={(event) => setDepartmentId(event.target.value)}
                     disabled={Boolean(lockDepartmentId)}
                     required={Boolean(lockDepartmentId)}
                   >
@@ -220,7 +229,7 @@ export function InviteEmployeeDialog({
                 </label>
                 <label>
                   Role
-                  <select name="roleKey" defaultValue="employee">
+                  <select name="roleKey" value={roleKey} onChange={(event) => setRoleKey(event.target.value)}>
                     {roles.map((role) => (
                       <option key={role.key} value={role.key}>
                         {role.name}
@@ -229,15 +238,21 @@ export function InviteEmployeeDialog({
                   </select>
                 </label>
                 <label className="invite-span-all">
-                  Reports to
-                  <select name="managerId" defaultValue="">
-                    <option value="">No manager</option>
+                  Reports to{sponsorRequired ? ' *' : ''}
+                  <select name="managerId" defaultValue="" required={sponsorRequired}>
+                    <option value="">{sponsorRequired ? 'Select supervisor' : 'No manager'}</option>
                     {managerOptions.map((person) => (
                       <option key={person.id} value={person.id}>
                         {person.firstName} {person.lastName}
                       </option>
                     ))}
                   </select>
+                  {sponsorRequired ? (
+                    <span className="field-hint">
+                      Required for {deskLabel.toLowerCase()} desks. They can log their own tasks; this person gets
+                      notified.
+                    </span>
+                  ) : null}
                 </label>
 
                 <fieldset className="invite-span-all invite-credential-field">

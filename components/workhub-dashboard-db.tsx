@@ -67,6 +67,7 @@ import {
   canViewDepartmentReports,
   inviteableRoleKeys,
 } from '@/lib/auth/permissions'
+import { canSelfCreateTask, isSponsoredContributor } from '@/lib/auth/sponsored'
 import {
   addAttachment,
   addComment,
@@ -100,6 +101,7 @@ import {
   setTaskPlacement,
 } from '@/app/actions'
 import { cancelInvite, resendInvite } from '@/app/invite-actions'
+import { CreateSelfTaskDialog } from '@/components/create-self-task-dialog'
 import { CreateDepartmentDialog } from '@/components/create-department-dialog'
 import { RemovePersonDialog } from '@/components/remove-person-dialog'
 import { EditPersonDialog } from '@/components/edit-person-dialog'
@@ -343,6 +345,7 @@ function ScorecardList({
 type DbDepartment = {
   id: string
   name: string
+  slug?: string
   owner?: { firstName: string; lastName: string } | null
   progress: number
   total: number
@@ -459,7 +462,7 @@ type Employee = Person & {
   email?: string
   teamId?: string | null
   managerId?: string | null
-  department?: { id?: string; name: string } | null
+  department?: { id?: string; name: string; slug?: string } | null
   team?: { id?: string; name: string } | null
   manager?: { id?: string; firstName: string; lastName: string } | null
   status?: string
@@ -541,6 +544,7 @@ export default function WorkhubDashboardDB({
   const [commandOpen, setCommandOpen] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
   const [showCreateDepartment, setShowCreateDepartment] = useState(false)
+  const [showSelfTask, setShowSelfTask] = useState(false)
   const [notificationRows, setNotificationRows] = useState(initialNotifications)
   const [unreadCount, setUnreadCount] = useState(unreadNotificationCount)
   const [managementRequestRows, setManagementRequestRows] = useState(initialManagementRequests)
@@ -615,13 +619,56 @@ export default function WorkhubDashboardDB({
     () => ({
       id: currentUserId,
       departmentId: currentUser?.departmentId ?? null,
+      managerId: currentUser?.managerId ?? null,
+      department: currentUser?.departmentId
+        ? {
+            id: currentUser.departmentId,
+            slug:
+              currentUser.department?.slug ??
+              initialDepartments.find((department) => department.id === currentUser.departmentId)?.slug,
+            name: currentUser.department?.name,
+          }
+        : null,
       roles: currentUserRoles.map((key) => ({ role: { key } })),
     }),
-    [currentUserId, currentUser?.departmentId, currentUserRoles],
+    [
+      currentUserId,
+      currentUser?.departmentId,
+      currentUser?.managerId,
+      currentUser?.department?.name,
+      currentUser?.department?.slug,
+      currentUserRoles,
+      initialDepartments,
+    ],
   )
   const isManagement = roleSet.has('admin') || roleSet.has('managing_director')
   const isDepartmentLeader = roleSet.has('department_head') || roleSet.has('manager')
   const canCreateWork = roleCanCreateWork(actor)
+  const canLogOwnTask = canSelfCreateTask(actor)
+  const sponsoredDesk = isSponsoredContributor(actor)
+  const sponsorName = currentUser?.manager
+    ? `${currentUser.manager.firstName} ${currentUser.manager.lastName}`
+    : null
+  const needsSponsor = sponsoredDesk && !currentUser?.managerId
+  const mySelfTaskProjects = useMemo(
+    () =>
+      projects
+        .filter(
+          (project) =>
+            project.projectStatus !== 'archived' &&
+            (project.ownerId === currentUserId || project.team?.some((member) => member.id === currentUserId)),
+        )
+        .map((project) => ({
+          id: project.id,
+          title: project.title,
+          departmentId: project.departmentId,
+          department: project.department,
+          contributingDepartmentIds: project.contributingDepartments?.map((entry) => entry.id) ?? [],
+          teamUserIds: project.team?.map((member) => member.id) ?? [],
+          milestones: project.milestones?.map((milestone) => ({ id: milestone.id, title: milestone.title })) ?? [],
+        })),
+    [projects, currentUserId],
+  )
   const currentUserDepartmentId = currentUser?.departmentId ?? null
   const posture = departmentPosture({ roleKeys: currentUserRoles, departmentId: currentUserDepartmentId })
   const showsDepartmentGrid = departmentPostureShowsGrid(posture)
@@ -1652,7 +1699,20 @@ export default function WorkhubDashboardDB({
             </button>
           </div>
         ))}
-        {visibleTasks.length === 0 && <div className="empty-state">No tasks match your search.</div>}
+        {visibleTasks.length === 0 && (
+          <div className="empty-state">
+            {canLogOwnTask && activeNav === 'My tasks' && !allWorkScope && filter === 'All' ? (
+              <div className="self-task-empty">
+                <p>Nothing on your queue yet — including verbal work that was never written down.</p>
+                <button type="button" className="create-button" onClick={() => setShowSelfTask(true)}>
+                  Add my task
+                </button>
+              </div>
+            ) : (
+              'No tasks match your search.'
+            )}
+          </div>
+        )}
       </div>
       {visibleTasks.length > 0 ? (
         <div className="task-pager">
@@ -2084,13 +2144,31 @@ export default function WorkhubDashboardDB({
                 eyebrow={clockLabel || 'Today'}
                 title={`${hello}, ${currentUser?.firstName ?? 'there'}`}
                 description={
-                  canRequestWork
-                    ? 'Your assignments, requests, and anything you have been invited into.'
-                    : 'What is moving in your department today.'
+                  canLogOwnTask
+                    ? sponsorName
+                      ? `Log your own work, stay aligned with ${sponsorName}, and track what is already on you.`
+                      : 'Log your own work, request help when you need it, and track what is already on you.'
+                    : canRequestWork
+                      ? 'Your assignments, requests, and anything you have been invited into.'
+                      : 'What is moving in your department today.'
                 }
-                action={canCreateWork ? () => setShowCreate(true) : undefined}
-                actionLabel="Create task"
+                actions={[
+                  ...(canLogOwnTask
+                    ? [{ label: 'Add my task', onClick: () => setShowSelfTask(true), variant: 'primary' as const }]
+                    : []),
+                  ...(canCreateWork
+                    ? [{ label: 'Create task', onClick: () => setShowCreate(true), variant: 'primary' as const }]
+                    : []),
+                ]}
               />
+              {needsSponsor ? (
+                <div className="drill-banner sponsor-nudge" role="status">
+                  <strong>Supervisor not set</strong>
+                  <span>
+                    Your desk is sponsored. Ask admin or your department lead to set Reports to so they get notified when you log work.
+                  </span>
+                </div>
+              ) : null}
               <section className="metric-grid" aria-label="Workspace summary">
                 <MetricCard featured label="Active tasks" value={String(metrics.active)} footer={`Across ${metrics.departments} departments`} icon={<Check aria-hidden="true" />} tone="teal-icon" onClick={() => nav('My tasks', { scope: 'all' })} />
                 <MetricCard label="Due this week" value={String(metrics.dueThisWeek)} footer={`${metrics.dueToday} due today`} icon={<Clock3 aria-hidden="true" />} tone="blue-icon" onClick={() => nav('My tasks', { scope: 'all', deadline: 'week' })} />
@@ -2098,12 +2176,33 @@ export default function WorkhubDashboardDB({
                 <MetricCard label="Completion rate" value={`${metrics.completionRate}%`} footer="Across current workspace" icon={<Target aria-hidden="true" />} tone="coral-icon" onClick={() => nav('My tasks', { scope: 'all' })} />
               </section>
               {taskFilterBar}
+              {canLogOwnTask && (
+                <section className="panel self-task-panel" style={{ marginBottom: 18 }}>
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Already working on something?</h2>
+                      <p>
+                        {sponsorName
+                          ? `Add it to your queue now. ${sponsorName} is notified automatically — no approval wait.`
+                          : 'Add it to your queue now. Your supervisor is notified automatically — no approval wait.'}
+                      </p>
+                    </div>
+                    <button type="button" className="create-button" onClick={() => setShowSelfTask(true)}>
+                      Add my task
+                    </button>
+                  </div>
+                </section>
+              )}
               {canRequestWork && (
                 <section className="panel request-work-panel" style={{ marginBottom: 18 }}>
                   <div className="panel-heading">
                     <div>
                       <h2>Request work</h2>
-                      <p>Your department head will review this and can turn it into a task</p>
+                      <p>
+                        {canLogOwnTask
+                          ? 'Need something new assigned that is not yours yet? Your supervisor reviews this and can turn it into a task.'
+                          : 'Your supervisor will review this and can turn it into a task.'}
+                      </p>
                     </div>
                   </div>
                   <div className="management-request-form">
@@ -2116,7 +2215,7 @@ export default function WorkhubDashboardDB({
                     </select>
                     <textarea value={requestDescription} onChange={(event) => setRequestDescription(event.target.value)} placeholder="Context, deadline, or why it matters" />
                     <button className="create-button" type="button" onClick={() => handleCreateManagementRequest('work')}>
-                      Send to my head
+                      Send to my supervisor
                     </button>
                   </div>
                   {managementRequestRows.filter((row) => row.kind === 'work').length > 0 && (
@@ -2179,11 +2278,29 @@ export default function WorkhubDashboardDB({
                 description={
                   allWorkScope
                     ? 'Every task you are allowed to see, filtered to the attention item you opened.'
-                    : 'Everything assigned to you, organized by urgency.'
+                    : canLogOwnTask
+                      ? sponsorName
+                        ? `Your queue — including work you log yourself. ${sponsorName} stays notified.`
+                        : 'Your queue — including work you log yourself after a verbal ask.'
+                      : 'Everything assigned to you, organized by urgency.'
                 }
-                action={canCreateWork ? () => setShowCreate(true) : undefined}
-                actionLabel="Create task"
+                actions={[
+                  ...(canLogOwnTask && !allWorkScope
+                    ? [{ label: 'Add my task', onClick: () => setShowSelfTask(true), variant: 'primary' as const }]
+                    : []),
+                  ...(canCreateWork
+                    ? [{ label: 'Create task', onClick: () => setShowCreate(true), variant: 'primary' as const }]
+                    : []),
+                ]}
               />
+              {needsSponsor && !allWorkScope ? (
+                <div className="drill-banner sponsor-nudge" role="status">
+                  <strong>Supervisor not set</strong>
+                  <span>
+                    Ask leadership to set your Reports to contact so they get notified when you add tasks.
+                  </span>
+                </div>
+              ) : null}
               {allWorkScope && (
                 <div className="drill-banner">
                   <button type="button" className="text-back" onClick={() => nav('My tasks')}>Back to my assignments</button>
@@ -2991,6 +3108,17 @@ export default function WorkhubDashboardDB({
         />
       )}
 
+      {canLogOwnTask && showSelfTask && (
+        <CreateSelfTaskDialog
+          sponsorName={sponsorName}
+          projects={mySelfTaskProjects}
+          onClose={() => {
+            setShowSelfTask(false)
+            router.refresh()
+          }}
+        />
+      )}
+
       {canCreateWork && showCreateProject && (
         <CreateProjectDialog
           people={activePeople}
@@ -3019,7 +3147,11 @@ export default function WorkhubDashboardDB({
       {canInvitePeople && showInvite && (
         <InviteEmployeeDialog
           people={activePeople}
-          departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+          departments={initialDepartments.map((department) => ({
+            id: department.id,
+            name: department.name,
+            slug: department.slug,
+          }))}
           roles={inviteRoles.length > 0 ? inviteRoles : workspaceRoles}
           lockDepartmentId={!isManagement && isDepartmentLeader ? currentUser?.departmentId ?? null : null}
           defaultDepartmentId={selectedDepartmentId}
@@ -3041,7 +3173,11 @@ export default function WorkhubDashboardDB({
         <EditPersonDialog
           person={editPersonTarget}
           people={people}
-          departments={initialDepartments.map((department) => ({ id: department.id, name: department.name }))}
+          departments={initialDepartments.map((department) => ({
+            id: department.id,
+            name: department.name,
+            slug: department.slug,
+          }))}
           teams={workspaceTeams.map((team) => ({
             id: team.id,
             name: team.name,

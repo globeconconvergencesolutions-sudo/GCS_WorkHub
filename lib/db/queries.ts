@@ -43,6 +43,7 @@ export async function getUserById(id: string) {
     where: eq(users.id, id),
     with: {
       department: true,
+      manager: true,
       roles: { with: { role: true } },
     },
   })
@@ -53,6 +54,7 @@ export async function getUserByEmail(email: string) {
     where: eq(users.email, email.toLowerCase()),
     with: {
       department: true,
+      manager: true,
       roles: { with: { role: true } },
     },
   })

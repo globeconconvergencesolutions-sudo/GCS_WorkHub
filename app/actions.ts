@@ -24,6 +24,7 @@ import {
   isDepartmentLeader,
   isManagement,
 } from '@/lib/auth/permissions'
+import { canSelfCreateTask } from '@/lib/auth/sponsored'
 import { provisionAuthIdentity, revokeAuthSessions } from '@/lib/auth/provision-user'
 import { getDb } from '@/lib/db'
 import { getCompany, getCurrentUser, getUserById, listTasks } from '@/lib/db/queries'
@@ -285,13 +286,23 @@ export async function createTask(formData: FormData) {
   if (!title) return { error: 'A task name is required.' }
 
   const [currentUser, company] = await Promise.all([getCurrentUser(), getCompany()])
-  if (!currentUser || !company) return { error: 'Workspace is not ready yet.' }
-  if (!canCreateWork(currentUser)) {
+  if (!currentUser) return { error: 'Your session expired. Sign in again, then add the task.' }
+  if (!company) return { error: 'Workspace is not ready yet.' }
+
+  const selfServe = canSelfCreateTask(currentUser) && !canCreateWork(currentUser)
+  if (!canCreateWork(currentUser) && !selfServe) {
     return denied('You are not allowed to create tasks for the workspace.')
   }
 
   const placement = String(formData.get('placement') ?? 'independent')
-  const assigneeId = String(formData.get('assigneeId') ?? currentUser.id)
+  let assigneeId = String(formData.get('assigneeId') ?? currentUser.id)
+  if (selfServe) {
+    assigneeId = currentUser.id
+    if (placement === 'new') {
+      return denied('Ask your supervisor or department lead to open a project. You can log your own tasks.')
+    }
+  }
+
   const assignee = assigneeId === currentUser.id ? currentUser : await getUserById(assigneeId)
   const resolvedCategory = resolveCategoryInput(formData)
   if ('error' in resolvedCategory) return { error: resolvedCategory.error }
@@ -343,6 +354,15 @@ export async function createTask(formData: FormData) {
     if (!projectId) return { error: 'Select a project for this task, or mark it independent.' }
     const visible = await requireVisibleProject(projectId)
     if ('error' in visible) return { error: visible.error }
+    if (selfServe) {
+      const loaded = await loadProjectAccess(projectId)
+      const onTeam = Boolean(
+        loaded?.access.teamUserIds?.includes(currentUser.id) || loaded?.access.ownerId === currentUser.id,
+      )
+      if (!onTeam) {
+        return denied('You can only attach self-logged work to projects you already belong to.')
+      }
+    }
     projectId = visible.project.id
     if (milestoneId) {
       const milestone = await getDb().query.projectMilestones.findFirst({
@@ -364,6 +384,10 @@ export async function createTask(formData: FormData) {
     }
   } else if (projectId) {
     departmentId = assignee?.departmentId || departmentId
+  }
+
+  if (selfServe) {
+    departmentId = currentUser.departmentId || departmentId
   }
 
   if (projectId && assignee?.departmentId && assignee.departmentId !== departmentId) {
@@ -395,7 +419,7 @@ export async function createTask(formData: FormData) {
     entityType: 'task',
     entityId: task.id,
     action: 'created',
-    summary: `created ${title}`,
+    summary: selfServe ? `logged personal task ${title}` : `created ${title}`,
   })
 
   if (assigneeId && assigneeId !== currentUser.id) {
@@ -408,6 +432,25 @@ export async function createTask(formData: FormData) {
       entityType: 'task',
       entityId: task.id,
     })
+  }
+
+  if (selfServe) {
+    let sponsorId = currentUser.managerId ?? null
+    if (!sponsorId && currentUser.departmentId) {
+      const [dept] = await getDb().select().from(departments).where(eq(departments.id, currentUser.departmentId)).limit(1)
+      sponsorId = dept?.ownerId ?? null
+    }
+    if (sponsorId && sponsorId !== currentUser.id) {
+      await getDb().insert(notifications).values({
+        companyId: company.id,
+        userId: sponsorId,
+        type: 'reminder',
+        title: 'Team member logged a task',
+        body: `${currentUser.firstName} ${currentUser.lastName} added “${title}” to their queue.`,
+        entityType: 'task',
+        entityId: task.id,
+      })
+    }
   }
 
   if (projectId && assignee?.departmentId) {
@@ -2458,9 +2501,13 @@ export async function createManagementRequest(formData: FormData) {
 
   const description = String(formData.get('description') ?? '').trim() || null
   let assigneeId = String(formData.get('assigneeId') ?? '') || null
-  if (kind === 'work' && currentUser.departmentId) {
-    const [dept] = await getDb().select().from(departments).where(eq(departments.id, currentUser.departmentId)).limit(1)
-    assigneeId = dept?.ownerId ?? assigneeId
+  if (kind === 'work') {
+    // Sponsored desks: prefer personal supervisor, then department head.
+    assigneeId = currentUser.managerId ?? null
+    if (!assigneeId && currentUser.departmentId) {
+      const [dept] = await getDb().select().from(departments).where(eq(departments.id, currentUser.departmentId)).limit(1)
+      assigneeId = dept?.ownerId ?? null
+    }
   }
   const priority = (String(formData.get('priority') || 'medium') ||
     'medium') as (typeof managementRequestPriorityEnum.enumValues)[number]
@@ -2484,8 +2531,11 @@ export async function createManagementRequest(formData: FormData) {
       companyId: company.id,
       userId: assigneeId,
       type: 'management_request',
-      title: 'New management request',
-      body: `${currentUser.firstName} ${currentUser.lastName} submitted "${title}".`,
+      title: kind === 'work' ? 'New work request' : 'New management request',
+      body:
+        kind === 'work'
+          ? `${currentUser.firstName} ${currentUser.lastName} asked for help with “${title}”.`
+          : `${currentUser.firstName} ${currentUser.lastName} submitted "${title}".`,
       entityType: 'management_request',
       entityId: request.id,
     })

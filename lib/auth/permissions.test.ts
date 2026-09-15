@@ -16,6 +16,12 @@ import {
   inviteableRoleKeys,
   type Actor,
 } from './permissions'
+import {
+  canSelfCreateTask,
+  isSponsoredContributor,
+  requiresSponsor,
+  sponsoredDeskLabel,
+} from './sponsored'
 
 function actor(id: string, role: string, departmentId: string | null = 'dept-1'): NonNullable<Actor> {
   return {
@@ -36,6 +42,7 @@ const md = actor('md', 'managing_director', null)
 const head = actor('head', 'department_head', 'dept-1')
 const manager = actor('mgr', 'manager', 'dept-1')
 const employee = actor('emp', 'employee', 'dept-1')
+const volunteer = actor('vol', 'volunteer', 'dept-vol')
 const otherEmployee = actor('emp-2', 'employee', 'dept-2')
 const otherHead = actor('head-2', 'department_head', 'dept-2')
 const ownTask = { assigneeId: 'emp', departmentId: 'dept-1' }
@@ -105,6 +112,30 @@ assert(!canInvite(head, { roleKey: 'volunteer', departmentId: 'dept-2' }), 'head
 
 assert(canSubmitLeadershipRequest(head) && !canSubmitLeadershipRequest(employee), 'leadership requests')
 assert(canSubmitWorkRequest(employee) && !canSubmitWorkRequest(head), 'employees request work')
+assert(canSubmitWorkRequest(volunteer) && !canSubmitWorkRequest(manager), 'volunteers request work')
+
+assert(canSelfCreateTask(employee) && canSelfCreateTask(volunteer), 'ICs can self-create tasks')
+assert(!canSelfCreateTask(head) && !canSelfCreateTask(admin), 'leaders use full create, not self-create')
+assert(isSponsoredContributor(volunteer), 'volunteer role is sponsored')
+assert(
+  isSponsoredContributor({
+    ...employee,
+    department: { id: 'dept-int', slug: 'interns', name: 'Interns' },
+  }),
+  'interns department is sponsored',
+)
+assert(
+  !isSponsoredContributor({
+    ...employee,
+    department: { id: 'dept-1', slug: 'operations', name: 'Ops' },
+  }),
+  'ops employee is not sponsored by dept alone',
+)
+assert(requiresSponsor({ roleKey: 'volunteer' }), 'volunteer requires sponsor')
+assert(requiresSponsor({ departmentSlug: 'attachees' }), 'attachees require sponsor')
+assert(!requiresSponsor({ roleKey: 'employee', departmentSlug: 'operations' }), 'ops employee no sponsor required')
+assert(sponsoredDeskLabel({ roleKey: 'volunteer' }) === 'Volunteer', 'volunteer desk label')
+assert(sponsoredDeskLabel({ departmentSlug: 'interns' }) === 'Intern', 'intern desk label')
 
 assert(!canDeactivateUser(md, admin, 1), 'md cannot deactivate admin')
 assert(!canDeactivateUser(admin, admin, 1), 'cannot deactivate self')

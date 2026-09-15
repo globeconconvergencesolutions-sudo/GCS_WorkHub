@@ -11,8 +11,21 @@ function appOrigin() {
 }
 
 function collectTrustedOrigins(primary: string) {
-  const origins = new Set<string>([primary, 'http://localhost:3000'])
-  for (const value of [process.env.URL, process.env.DEPLOY_URL, process.env.DEPLOY_PRIME_URL, process.env.AUTH_URL, process.env.BETTER_AUTH_URL]) {
+  const origins = new Set<string>([
+    primary,
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+  ])
+  for (const value of [
+    process.env.URL,
+    process.env.DEPLOY_URL,
+    process.env.DEPLOY_PRIME_URL,
+    process.env.AUTH_URL,
+    process.env.BETTER_AUTH_URL,
+    process.env.NEXT_PUBLIC_APP_URL,
+  ]) {
     const trimmed = value?.trim().replace(/\/$/, '')
     if (trimmed) origins.add(trimmed)
   }

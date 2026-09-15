@@ -1,6 +1,7 @@
 'use server'
 
 import { canDeactivateUser, canEditPerson, canInvite, canManageUsers, denied, isDepartmentHead, isManagement } from '@/lib/auth/permissions'
+import { requiresSponsor } from '@/lib/auth/sponsored'
 import {
   createUserInvite,
   findOpenInviteByToken,
@@ -133,6 +134,26 @@ export async function inviteEmployee(formData: FormData) {
   if ((roleKey === 'department_head' || roleKey === 'manager') && !departmentId) {
     return { error: 'Assign a department for this role.' }
   }
+
+  let departmentSlug: string | null = null
+  if (departmentId) {
+    const [department] = await getDb().select().from(departments).where(eq(departments.id, departmentId)).limit(1)
+    departmentSlug = department?.slug ?? null
+  }
+  if (requiresSponsor({ roleKey, departmentSlug }) && !managerId) {
+    return {
+      error: 'Sponsored desks (volunteers, interns, attachees) need a supervisor under Reports to.',
+    }
+  }
+  if (managerId === '' || managerId === null) {
+    // ok for non-sponsored
+  } else if (managerId) {
+    const manager = await getUserById(managerId)
+    if (!manager || manager.status === 'inactive') {
+      return { error: 'Choose an active supervisor.' }
+    }
+  }
+
   if (!firstName || !lastName) return { error: 'First and last name are required.' }
   if (!email || !email.includes('@')) return { error: 'A valid work email is required.' }
   if (!jobTitle) return { error: 'A job title is required.' }
@@ -721,6 +742,18 @@ export async function updatePerson(formData: FormData) {
     const manager = await getUserById(managerId)
     if (!manager || manager.status === 'inactive') {
       return { error: 'Choose an active manager.' }
+    }
+  }
+
+  let departmentSlug: string | null = null
+  if (departmentId) {
+    const [department] = await getDb().select().from(departments).where(eq(departments.id, departmentId)).limit(1)
+    departmentSlug = department?.slug ?? null
+  }
+  const effectiveRoleKey = roleKey || target.roles?.[0]?.role.key || 'employee'
+  if (requiresSponsor({ roleKey: effectiveRoleKey, departmentSlug }) && !managerId) {
+    return {
+      error: 'Sponsored desks (volunteers, interns, attachees) need a supervisor under Reports to.',
     }
   }
 

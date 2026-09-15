@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useTransition, type FormEvent } f
 import { Pencil, X } from 'lucide-react'
 import { updatePerson } from '@/app/invite-actions'
 import { Button } from '@/components/ui/button'
+import { requiresSponsor, sponsoredDeskLabel } from '@/lib/auth/sponsored'
 import { fullName } from '@/lib/format'
 import type { Person } from '@/lib/types'
 
@@ -30,7 +31,7 @@ export function EditPersonDialog({
 }: {
   person: Target
   people: Target[]
-  departments: { id: string; name: string }[]
+  departments: { id: string; name: string; slug?: string }[]
   teams: { id: string; name: string; departmentId: string | null }[]
   roles: { key: string; name: string }[]
   onClose: () => void
@@ -38,9 +39,9 @@ export function EditPersonDialog({
 }) {
   const [error, setError] = useState<string | null>(null)
   const [departmentId, setDepartmentId] = useState(person.department?.id ?? person.departmentId ?? '')
+  const [roleKey, setRoleKey] = useState(person.roles?.[0]?.role.key ?? 'employee')
   const [pending, startTransition] = useTransition()
   const firstFieldRef = useRef<HTMLInputElement | null>(null)
-  const primaryRole = person.roles?.[0]?.role.key ?? 'employee'
 
   const managers = useMemo(
     () =>
@@ -56,6 +57,9 @@ export function EditPersonDialog({
     () => teams.filter((team) => !departmentId || team.departmentId === departmentId),
     [teams, departmentId],
   )
+  const selectedDepartmentSlug = departments.find((department) => department.id === departmentId)?.slug ?? null
+  const sponsorRequired = requiresSponsor({ roleKey, departmentSlug: selectedDepartmentSlug })
+  const deskLabel = sponsoredDeskLabel({ roleKey, departmentSlug: selectedDepartmentSlug })
 
   useEffect(() => {
     const previous = document.body.style.overflow
@@ -168,19 +172,33 @@ export function EditPersonDialog({
                 </select>
               </label>
               <label>
-                Reports to
-                <select name="managerId" defaultValue={person.manager?.id ?? person.managerId ?? ''}>
-                  <option value="">No manager</option>
+                Reports to{sponsorRequired ? ' *' : ''}
+                <select
+                  name="managerId"
+                  defaultValue={person.manager?.id ?? person.managerId ?? ''}
+                  required={sponsorRequired}
+                >
+                  <option value="">{sponsorRequired ? 'Select supervisor' : 'No manager'}</option>
                   {managers.map((entry) => (
                     <option key={entry.id} value={entry.id}>
                       {fullName(entry)}
                     </option>
                   ))}
                 </select>
+                {sponsorRequired ? (
+                  <span className="field-hint">
+                    Required for {deskLabel.toLowerCase()} desks. They log their own tasks; this supervisor is notified.
+                  </span>
+                ) : null}
               </label>
               <label>
                 Primary role
-                <select name="roleKey" defaultValue={primaryRole} required>
+                <select
+                  name="roleKey"
+                  value={roleKey}
+                  onChange={(event) => setRoleKey(event.target.value)}
+                  required
+                >
                   {roles.map((role) => (
                     <option key={role.key} value={role.key}>
                       {role.name}

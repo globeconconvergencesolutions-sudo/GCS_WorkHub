@@ -3,7 +3,7 @@
  * Safe to re-run. Usage: pnpm exec tsx scripts/ensure-volunteer-martha.ts
  */
 import { config } from 'dotenv'
-import { eq } from 'drizzle-orm'
+import { and, eq, ne } from 'drizzle-orm'
 import { neon } from '@neondatabase/serverless'
 import bcrypt from 'bcryptjs'
 import { drizzle } from 'drizzle-orm/neon-http'
@@ -39,7 +39,8 @@ async function ensureRole() {
       .update(roles)
       .set({
         name: 'Volunteer',
-        description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+        description:
+          'Sponsored contributor desk — can log own tasks; supervisor is notified',
         rank: 15,
       })
       .where(eq(roles.id, existing.id))
@@ -50,7 +51,8 @@ async function ensureRole() {
     .values({
       key: 'volunteer',
       name: 'Volunteer',
-      description: 'Supports GCS work with a focused volunteer desk — assigned tasks only',
+      description:
+        'Sponsored contributor desk — can log own tasks; supervisor is notified',
       rank: 15,
     })
     .returning()
@@ -68,7 +70,7 @@ async function ensureVolunteersDepartment(companyId: string) {
     if (!team) {
       await db.insert(teams).values({ departmentId: existing.id, name: 'Volunteers Desk' })
     }
-    return existing.id
+    return existing
   }
   const [created] = await db
     .insert(departments)
@@ -80,10 +82,45 @@ async function ensureVolunteersDepartment(companyId: string) {
     })
     .returning()
   await db.insert(teams).values({ departmentId: created.id, name: 'Volunteers Desk' })
-  return created.id
+  return created
 }
 
-async function ensureMartha(companyId: string, departmentId: string, roleId: string) {
+async function resolveSponsorId(companyId: string, departmentOwnerId?: string | null) {
+  if (departmentOwnerId) return departmentOwnerId
+
+  const [mdRoleRow] = await db.select().from(roles).where(eq(roles.key, 'managing_director')).limit(1)
+  if (mdRoleRow) {
+    const [mdLink] = await db.select().from(userRoles).where(eq(userRoles.roleId, mdRoleRow.id)).limit(1)
+    if (mdLink) {
+      const [mdUser] = await db
+        .select()
+        .from(users)
+        .where(and(eq(users.id, mdLink.userId), ne(users.status, 'inactive')))
+        .limit(1)
+      if (mdUser) return mdUser.id
+    }
+  }
+
+  const [adminRole] = await db.select().from(roles).where(eq(roles.key, 'admin')).limit(1)
+  if (adminRole) {
+    const [adminLink] = await db.select().from(userRoles).where(eq(userRoles.roleId, adminRole.id)).limit(1)
+    if (adminLink) return adminLink.userId
+  }
+
+  const [anyone] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.companyId, companyId), ne(users.status, 'inactive')))
+    .limit(1)
+  return anyone?.id ?? null
+}
+
+async function ensureMartha(
+  companyId: string,
+  departmentId: string,
+  roleId: string,
+  sponsorId: string | null,
+) {
   const passwordHash = await bcrypt.hash(MARTHA_PASSWORD, 10)
   const [desk] = await db.select().from(teams).where(eq(teams.departmentId, departmentId)).limit(1)
   const [existing] = await db.select().from(users).where(eq(users.email, MARTHA_EMAIL)).limit(1)
@@ -103,6 +140,7 @@ async function ensureMartha(companyId: string, departmentId: string, roleId: str
         mustChangePassword: false,
         departmentId,
         teamId: desk?.id ?? existing.teamId,
+        managerId: sponsorId && sponsorId !== existing.id ? sponsorId : existing.managerId,
       })
       .where(eq(users.id, existing.id))
   } else {
@@ -112,6 +150,7 @@ async function ensureMartha(companyId: string, departmentId: string, roleId: str
         companyId,
         departmentId,
         teamId: desk?.id ?? null,
+        managerId: sponsorId,
         email: MARTHA_EMAIL,
         firstName: 'Martha',
         lastName: 'Volunteer',
@@ -129,6 +168,10 @@ async function ensureMartha(companyId: string, departmentId: string, roleId: str
 
   if (!userId) throw new Error('Martha account could not be created.')
 
+  if (sponsorId && sponsorId !== userId) {
+    await db.update(users).set({ managerId: sponsorId }).where(eq(users.id, userId))
+  }
+
   await db.delete(userRoles).where(eq(userRoles.userId, userId))
   await db.insert(userRoles).values({ userId, roleId })
 
@@ -141,7 +184,7 @@ async function ensureMartha(companyId: string, departmentId: string, roleId: str
     passwordHash: person.passwordHash,
   })
 
-  return userId
+  return { userId, managerId: person.managerId ?? sponsorId }
 }
 
 async function main() {
@@ -149,13 +192,15 @@ async function main() {
   if (!company) throw new Error('No company found. Run db:seed first.')
 
   const roleId = await ensureRole()
-  const departmentId = await ensureVolunteersDepartment(company.id)
-  const marthaId = await ensureMartha(company.id, departmentId, roleId)
+  const volDept = await ensureVolunteersDepartment(company.id)
+  const sponsorId = await resolveSponsorId(company.id, volDept.ownerId)
+  const martha = await ensureMartha(company.id, volDept.id, roleId, sponsorId)
 
   console.log('Volunteer desk ready')
   console.log(`  Role: volunteer`)
-  console.log(`  Department: Volunteers (${departmentId})`)
-  console.log(`  Martha: ${MARTHA_EMAIL} / ${MARTHA_PASSWORD} (${marthaId})`)
+  console.log(`  Department: Volunteers (${volDept.id})`)
+  console.log(`  Martha: ${MARTHA_EMAIL} / ${MARTHA_PASSWORD} (${martha.userId})`)
+  console.log(`  Supervisor (Reports to): ${martha.managerId ?? 'none — set via Edit person'}`)
 }
 
 main().catch((error) => {

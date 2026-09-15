@@ -9,6 +9,8 @@ export type RoleKey =
 export type Actor = {
   id: string
   departmentId?: string | null
+  managerId?: string | null
+  department?: { id?: string; slug?: string; name?: string } | null
   roles?: { role: { key: string } }[]
 } | null
 
